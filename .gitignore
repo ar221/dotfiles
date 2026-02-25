@@ -1,0 +1,53 @@
+# Caches and generated
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+*.qmlc
+*.jsc
+*.log
+*.bak
+*.tmp
+
+# Secrets and credentials
+.env
+.env.*
+secrets.json
+*_secret.json
+*.key
+*.pem
+*-cookies.txt
+cookies.txt
+
+# Fish history and runtime
+fish/fish_history
+fish/fish_variables
+fish/completions/
+
+# Bat cache
+bat/cache/
+
+# Btop logs
+btop/btop.log
+
+# MPD state
+mpd/pid
+mpd/state
+mpd/sticker.sql
+mpd/database
+
+# Yazi cache
+yazi/cache/
+
+# Git credentials
+git/credentials
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*~
+.vscode/
+.idea/

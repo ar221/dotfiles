@@ -1,0 +1,98 @@
+# Matugen configuration for ii-niri
+# Generates Material You colors from wallpaper
+
+[config]
+version_check = false
+
+# Colors for Quickshell ii
+[templates.m3colors]
+input_path = '~/.config/matugen/templates/colors.json'
+output_path = '~/.local/state/quickshell/user/generated/colors.json'
+
+# Fuzzel launcher theme
+[templates.fuzzel]
+input_path = '~/.config/matugen/templates/fuzzel/fuzzel_theme.ini'
+output_path = '~/.config/fuzzel/fuzzel_theme.ini'
+
+# GTK3 theme
+[templates.gtk3]
+input_path = '~/.config/matugen/templates/gtk-3.0/gtk.css'
+output_path = '~/.config/gtk-3.0/gtk.css'
+
+# GTK4 theme
+[templates.gtk4]
+input_path = '~/.config/matugen/templates/gtk-4.0/gtk.css'
+output_path = '~/.config/gtk-4.0/gtk.css'
+
+# KDE colors (for Dolphin integration)
+[templates.kde_colors]
+input_path = '~/.config/matugen/templates/kde/color.txt'
+output_path = '~/.local/state/quickshell/user/generated/color.txt'
+
+[templates.folders-color]
+input_path  = './templates/folder-color.txt'
+output_path = '~/.config/matugen/papirus-folders/folder-color.txt'
+post_hook = 'bash ~/.config/matugen/papirus-folders/change-icons.sh'
+
+[templates.qt5ct]
+input_path = '~/.config/matugen/templates/qtct-colors-new.conf'
+output_path = '~/.config/qt5ct/colors/matugen.conf'
+
+# [templates.kvantum]
+# input_path = '~/.config/matugen/templates/matugen.kvconfig'
+# output_path = '~/.config/Kvantum/matugen/matugen.kvconfig'
+
+[templates.qt6ct]
+input_path = '~/.config/matugen/templates/qtct-colors-new.conf'
+output_path = '~/.config/qt6ct/colors/matugen.conf'
+
+# Wallpaper path tracking
+[templates.wallpaper]
+input_path = '~/.config/matugen/templates/wallpaper.txt'
+output_path = '~/.local/state/quickshell/user/generated/wallpaper/path.txt'
+
+[templates.vesktop]
+input_path  = "./templates/discord.css"
+output_path = "~/.config/vesktop/themes/Matugen.css"
+
+[templates.rmpc]
+input_path = '~/.config/matugen/templates/rmpc.ron'
+output_path = '~/.config/rmpc/themes/custom.ron'
+
+[templates.yazi]
+input_path  = './templates/terminal/yazi.toml'
+output_path = '~/.config/yazi/theme.toml'
+
+[templates.fish]
+input_path  = './templates/terminal/colors.fish'
+output_path = '~/.config/fish/themes/Matugen.theme'
+
+[templates.fzf]
+input_path  = './templates/terminal/fzf.sh'
+output_path = '~/.cache/zsh/fzf'
+
+[templates.bat]
+input_path  = './templates/terminal/bat.theme'
+output_path = '~/.config/bat/themes/Matugen.theme'
+
+[templates.neovim-nvchad]
+input_path  = './templates/terminal/nvchad.lua'
+output_path = '~/.local/share/nvim/lazy/base46/lua/base46/themes/matugen.lua'
+
+[templates.cava]
+input_path  = "./templates/terminal/cava.config"
+output_path = "~/.config/cava/config"
+
+[templates.btop]
+input_path  = './templates/terminal/btop.theme'
+output_path = '~/.config/btop/themes/matugen.theme'
+
+[templates.pywalfox]
+input_path = '~/.config/matugen/templates/pywalfox-colors.json'
+output_path = '~/.cache/wal/colors.json'
+post_hook = "pywalfox update"
+
+[templates.iisddmtheme]
+input_path = '~/.config/ii-sddm-theme/SddmColors.qml'
+output_path = '~/.config/ii-sddm-theme/Colors.qml'
+post_hook = 'python3 ~/.config/ii-sddm-theme/generate_settings.py && sudo ~/.config/ii-sddm-theme/sddm-theme-apply.sh &'

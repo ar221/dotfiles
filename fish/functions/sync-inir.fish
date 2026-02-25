@@ -34,4 +34,6 @@ function sync-inir -d "Sync iNiR fork with upstream snowarch/inir"
     git push
     echo "Synced and pushed."
     popd
+
+    sync-inir-qs
 end

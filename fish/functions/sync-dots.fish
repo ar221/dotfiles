@@ -1,5 +1,5 @@
 function sync-dots -d "Sync local dotfiles to ar221/dotfiles repo"
-    set -l repo /tmp/dotfiles-setup
+    set -l repo ~/Github/dotfiles
     set -l configs kitty fish niri starship yazi lazygit btop foot ghostty matugen nvim fastfetch mpv zathura fuzzel git alacritty bat cava fontconfig gtk-3.0 gtk-4.0 qt5ct qt6ct paru mpd rmpc
 
     if not test -d $repo/.git

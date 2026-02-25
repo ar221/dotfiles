@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Bootstrap script for fresh CachyOS/Arch install
-# Clones repos, installs packages, deploys configs
+# 1. Clone & run iNiR setup (packages, system, shell)
+# 2. Overlay personal dotfiles on top
 set -euo pipefail
 
 DOTFILES_REPO="https://github.com/ar221/dotfiles.git"
@@ -20,25 +21,16 @@ reset='\033[0m'
 info()  { echo -e "${cyan}::${reset} $*"; }
 ok()    { echo -e "${green}✓${reset} $*"; }
 warn()  { echo -e "${yellow}!${reset} $*"; }
-err()   { echo -e "${red}✗${reset} $*"; }
 
-# ── Helpers ─────────────────────────────────────────────────────────
 confirm() {
     read -rp "$1 [Y/n] " ans
     [[ -z "$ans" || "$ans" =~ ^[Yy] ]]
 }
 
-# ── Clone repos ─────────────────────────────────────────────────────
+# ── Step 1: Clone repos ────────────────────────────────────────────
 clone_repos() {
     info "Setting up repositories..."
     mkdir -p "$GITHUB_DIR"
-
-    if [[ -d "$DOTFILES_DIR/.git" ]]; then
-        ok "Dotfiles repo already at $DOTFILES_DIR"
-    else
-        git clone "$DOTFILES_REPO" "$DOTFILES_DIR"
-        ok "Cloned dotfiles"
-    fi
 
     if [[ -d "$INIR_DIR/.git" ]]; then
         ok "iNiR repo already at $INIR_DIR"
@@ -48,89 +40,30 @@ clone_repos() {
         git remote add upstream "$INIR_UPSTREAM" 2>/dev/null || true
         ok "Cloned iNiR (upstream: snowarch/iNiR)"
     fi
-}
 
-# ── Install packages ────────────────────────────────────────────────
-install_packages() {
-    info "Installing packages..."
-
-    # Core
-    local core=(
-        fish starship fzf ripgrep bat eza broot
-        yazi kitty foot ghostty alacritty
-        neovim git lazygit paru less
-        btop htop fastfetch
-        niri fuzzel zathura
-        matugen swww
-    )
-
-    # Media
-    local media=(
-        mpd rmpc cava mpv ffmpeg
-    )
-
-    # System
-    local system=(
-        pipewire wireplumber polkit-gnome
-        wl-clipboard cliphist
-        dolphin firefox
-        rsync curl trash-cli bc jq exiftool
-    )
-
-    # Theming
-    local theming=(
-        ttf-jetbrains-mono-nerd
-        papirus-icon-theme
-        qt5ct qt6ct
-    )
-
-    # Development
-    local dev=(
-        python python-pip
-        rustup nodejs npm
-    )
-
-    # Archive tools
-    local archive=(
-        tar unzip p7zip unrar
-    )
-
-    local all=("${core[@]}" "${media[@]}" "${system[@]}" "${theming[@]}" "${dev[@]}" "${archive[@]}")
-
-    # Filter to only missing packages
-    local to_install=()
-    for pkg in "${all[@]}"; do
-        if ! pacman -Qi "$pkg" &>/dev/null; then
-            to_install+=("$pkg")
-        fi
-    done
-
-    if [[ ${#to_install[@]} -eq 0 ]]; then
-        ok "All packages already installed"
-        return
-    fi
-
-    echo ""
-    info "Installing ${#to_install[@]} packages:"
-    printf '  %s\n' "${to_install[@]}"
-    echo ""
-
-    if confirm "Proceed?"; then
-        # Use paru if available, fall back to pacman
-        if command -v paru &>/dev/null; then
-            paru -S --needed "${to_install[@]}"
-        else
-            sudo pacman -S --needed "${to_install[@]}"
-        fi
-        ok "Packages installed"
+    if [[ -d "$DOTFILES_DIR/.git" ]]; then
+        ok "Dotfiles repo already at $DOTFILES_DIR"
     else
-        warn "Skipped package installation"
+        git clone "$DOTFILES_REPO" "$DOTFILES_DIR"
+        ok "Cloned dotfiles"
     fi
 }
 
-# ── Deploy dotfiles ─────────────────────────────────────────────────
-deploy_dotfiles() {
-    info "Deploying dotfiles to ~/.config..."
+# ── Step 2: Run iNiR setup ─────────────────────────────────────────
+run_inir_setup() {
+    info "Running iNiR setup (packages, system config, shell)..."
+    if [[ -x "$INIR_DIR/setup" ]]; then
+        "$INIR_DIR/setup" install
+        ok "iNiR setup complete"
+    else
+        warn "iNiR setup script not found or not executable at $INIR_DIR/setup"
+        return 1
+    fi
+}
+
+# ── Step 3: Overlay personal dotfiles ───────────────────────────────
+overlay_dotfiles() {
+    info "Overlaying personal dotfiles..."
 
     local configs=(
         kitty fish niri starship yazi lazygit btop foot ghostty
@@ -140,53 +73,55 @@ deploy_dotfiles() {
 
     for d in "${configs[@]}"; do
         if [[ -d "$DOTFILES_DIR/$d" ]]; then
-            # Back up existing config if it exists and isn't a previous deploy
-            if [[ -d "$HOME/.config/$d" && ! -f "$HOME/.config/$d/.bootstrapped" ]]; then
-                warn "Backing up existing $d → $d.bak"
-                mv "$HOME/.config/$d" "$HOME/.config/$d.bak"
-            fi
-            rsync -a --delete \
+            mkdir -p "$HOME/.config/$d"
+            rsync -a \
                 --exclude='fish_history' \
                 --exclude='fish_variables' \
                 --exclude='completions/' \
                 "$DOTFILES_DIR/$d/" "$HOME/.config/$d/"
-            touch "$HOME/.config/$d/.bootstrapped"
         fi
     done
-    ok "Dotfiles deployed"
+    ok "Personal configs overlaid"
 }
 
-# ── Deploy iNiR ─────────────────────────────────────────────────────
-deploy_inir() {
-    info "Deploying iNiR to ~/.config/quickshell/ii/..."
-    mkdir -p "$HOME/.config/quickshell/ii"
-    rsync -a --delete \
-        --exclude='.git/' \
-        --exclude='__pycache__/' \
-        --exclude='.venv/' \
-        --exclude='node_modules/' \
-        --exclude='*.pyc' \
-        --exclude='.claude/' \
-        --exclude='.vscode/' \
-        "$INIR_DIR/" "$HOME/.config/quickshell/ii/"
-    ok "iNiR deployed"
-}
+# ── Step 4: Extra packages iNiR doesn't cover ──────────────────────
+install_extras() {
+    local extras=(
+        ghostty alacritty zathura
+        mpd rmpc cava
+        lazygit btop htop fastfetch
+        eza broot yazi bat
+        trash-cli bc exiftool
+    )
 
-# ── Post-install ────────────────────────────────────────────────────
-post_install() {
-    info "Running post-install tasks..."
-
-    # Set fish as default shell
-    if [[ "$SHELL" != *fish* ]]; then
-        if confirm "Set fish as default shell?"; then
-            chsh -s "$(which fish)"
-            ok "Default shell set to fish"
+    local to_install=()
+    for pkg in "${extras[@]}"; do
+        if ! pacman -Qi "$pkg" &>/dev/null; then
+            to_install+=("$pkg")
         fi
-    else
-        ok "Fish is already default shell"
+    done
+
+    if [[ ${#to_install[@]} -eq 0 ]]; then
+        ok "All extra packages already installed"
+        return
     fi
 
-    # Set up git
+    info "Installing ${#to_install[@]} extra packages not covered by iNiR:"
+    printf '  %s\n' "${to_install[@]}"
+
+    if confirm "Proceed?"; then
+        if command -v paru &>/dev/null; then
+            paru -S --needed "${to_install[@]}"
+        else
+            sudo pacman -S --needed "${to_install[@]}"
+        fi
+        ok "Extra packages installed"
+    fi
+}
+
+# ── Step 5: Git & post-install ──────────────────────────────────────
+post_install() {
+    info "Configuring git..."
     git config --global user.name "Ayaz Rashid"
     git config --global user.email "rashid.ayaz@gmail.com"
     git config --global init.defaultBranch main
@@ -208,9 +143,9 @@ post_install() {
     git config --global tag.sort -version:refname
     ok "Git configured"
 
-    # gh auth reminder
-    if ! gh auth status &>/dev/null 2>&1; then
-        warn "GitHub CLI not authenticated — run: gh auth login"
+    # gh auth
+    if command -v gh &>/dev/null && ! gh auth status &>/dev/null 2>&1; then
+        warn "Run 'gh auth login' to authenticate GitHub CLI"
     fi
 
     # Firefox symlink for pywalfox
@@ -220,12 +155,13 @@ post_install() {
         ok "Firefox symlink created"
     fi
 
-    # Kitty remote control
-    if ! grep -q "allow_remote_control" "$HOME/.config/kitty/kitty.conf" 2>/dev/null; then
-        warn "Add 'allow_remote_control yes' and 'listen_on unix:/tmp/kitty-{kitty_pid}' to kitty.conf for live reload"
+    # Fish as default shell
+    if [[ "$SHELL" != *fish* ]]; then
+        if confirm "Set fish as default shell?"; then
+            chsh -s "$(which fish)"
+            ok "Default shell set to fish"
+        fi
     fi
-
-    ok "Post-install complete"
 }
 
 # ── Main ────────────────────────────────────────────────────────────
@@ -237,13 +173,9 @@ main() {
     echo ""
 
     clone_repos
-
-    if confirm "Install packages?"; then
-        install_packages
-    fi
-
-    deploy_dotfiles
-    deploy_inir
+    run_inir_setup
+    install_extras
+    overlay_dotfiles
     post_install
 
     echo ""

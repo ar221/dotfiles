@@ -1,7 +1,11 @@
 if status is-interactive
 
-    # No greeting
-    set fish_greeting
+    # Pokemon + fastfetch greeting
+    function fish_greeting
+        if command -q pokemon-colorscripts; and command -q fastfetch
+            fastfetch --data-raw (pokemon-colorscripts -r --no-title | string collect)
+        end
+    end
 
     # Use starship
     starship init fish | source

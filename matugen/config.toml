@@ -87,10 +87,20 @@ output_path = "~/.config/cava/config"
 input_path  = './templates/terminal/btop.theme'
 output_path = '~/.config/btop/themes/matugen.theme'
 
-[templates.pywalfox]
-input_path = '~/.config/matugen/templates/pywalfox-colors.json'
-output_path = '~/.cache/wal/colors.json'
-post_hook = "pywalfox update"
+# SillyTavern NSD-DarkLuxury color overrides
+[templates.sillytavern]
+input_path = './templates/sillytavern.css'
+output_path = '/mnt/hdd/AI/SillyTavern/data/default-user/extensions/NSD-DarkLuxury/matugen-colors.css'
+
+[templates.firefox]
+input_path = '~/.config/matugen/templates/firefox/shy-material-colors.css'
+output_path = '~/.config/mozilla/firefox/3kmy38qw.default-release/chrome/ShyFox/shy-material-colors.css'
+
+# pywalfox removed — shy-material-colors.css handles Firefox theming directly
+# [templates.pywalfox]
+# input_path = '~/.config/matugen/templates/pywalfox-colors.json'
+# output_path = '~/.cache/wal/colors.json'
+# post_hook = "pywalfox update"
 
 [templates.iisddmtheme]
 input_path = '~/.config/ii-sddm-theme/SddmColors.qml'

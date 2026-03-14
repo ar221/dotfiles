@@ -42,6 +42,13 @@ yazi/cache/
 # Git credentials
 git/credentials
 
+# Newsboat cache/db (config and urls are tracked)
+newsboat/cache.db
+newsboat/cache.db.lock
+newsboat/history.search
+newsboat/history.cmdline
+newsboat/colors
+
 # OS
 .DS_Store
 Thumbs.db

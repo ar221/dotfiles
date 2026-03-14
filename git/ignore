@@ -1,1 +1,40 @@
 **/.claude/settings.local.json
+
+# Editor artifacts
+*.swp
+*.swo
+*~
+.*.un~
+*.bak
+*.orig
+*.tmp
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.eggs/
+*.egg-info/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace

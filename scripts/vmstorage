@@ -1,0 +1,104 @@
+#!/bin/bash
+# Mount/unmount Windows 11 VM storage image
+
+IMG="/mnt/hdd/VMStorage/win11storage.img"
+MOUNTPOINT="/mnt/vmstorage"
+LOOP_LABEL="vmstorage"
+
+usage() {
+    echo "Usage: vmstorage {mount|unmount|status}"
+    exit 1
+}
+
+get_loop() {
+    losetup -j "$IMG" 2>/dev/null | head -1 | cut -d: -f1
+}
+
+do_mount() {
+    if mountpoint -q "$MOUNTPOINT" 2>/dev/null; then
+        echo "Already mounted at $MOUNTPOINT"
+        exit 0
+    fi
+
+    if [ ! -f "$IMG" ]; then
+        echo "Error: Image not found at $IMG"
+        exit 1
+    fi
+
+    # Set up loop device with partition scanning
+    LOOP=$(sudo losetup --find --show --partscan "$IMG")
+    if [ -z "$LOOP" ]; then
+        echo "Error: Failed to set up loop device"
+        exit 1
+    fi
+    echo "Loop device: $LOOP"
+
+    # Wait briefly for partition devices to appear
+    sleep 0.5
+
+    # The NTFS data partition is partition 2
+    PART="${LOOP}p2"
+    if [ ! -b "$PART" ]; then
+        echo "Error: Partition $PART not found"
+        sudo losetup -d "$LOOP"
+        exit 1
+    fi
+
+    # Create mount point if needed
+    sudo mkdir -p "$MOUNTPOINT"
+
+    # Mount NTFS partition (ntfs3 kernel driver, read-write)
+    if sudo mount -t ntfs3 -o uid=$(id -u),gid=$(id -g),fmask=0133,dmask=0022 "$PART" "$MOUNTPOINT"; then
+        echo "Mounted at $MOUNTPOINT"
+    else
+        echo "Error: Mount failed"
+        sudo losetup -d "$LOOP"
+        exit 1
+    fi
+}
+
+do_unmount() {
+    if ! mountpoint -q "$MOUNTPOINT" 2>/dev/null; then
+        echo "Not mounted"
+        # Clean up any stale loop device
+        LOOP=$(get_loop)
+        if [ -n "$LOOP" ]; then
+            sudo losetup -d "$LOOP"
+            echo "Cleaned up stale loop device $LOOP"
+        fi
+        exit 0
+    fi
+
+    if sudo umount "$MOUNTPOINT"; then
+        echo "Unmounted $MOUNTPOINT"
+    else
+        echo "Error: Unmount failed (files in use?)"
+        exit 1
+    fi
+
+    # Detach loop device
+    LOOP=$(get_loop)
+    if [ -n "$LOOP" ]; then
+        sudo losetup -d "$LOOP"
+        echo "Detached $LOOP"
+    fi
+}
+
+do_status() {
+    LOOP=$(get_loop)
+    if mountpoint -q "$MOUNTPOINT" 2>/dev/null; then
+        echo "Mounted at $MOUNTPOINT (loop: ${LOOP:-unknown})"
+        df -h "$MOUNTPOINT" | tail -1
+    elif [ -n "$LOOP" ]; then
+        echo "Loop device active ($LOOP) but not mounted"
+    else
+        echo "Not mounted"
+    fi
+}
+
+case "${1:-}" in
+    mount)   do_mount ;;
+    unmount|umount) do_unmount ;;
+    status)  do_status ;;
+    *)       usage ;;
+esac

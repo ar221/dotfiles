@@ -58,3 +58,7 @@ Thumbs.db
 *~
 .vscode/
 .idea/
+scripts/claude
+scripts/nekot
+scripts/zoxide
+scripts/z.lua

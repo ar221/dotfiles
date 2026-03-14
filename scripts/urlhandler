@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# urlhandler — dispatch URLs by type
+# Used by newsboat and other TUI apps
+
+readonly URL="${1:?Usage: urlhandler <url>}"
+
+# Strip query string for extension matching
+readonly URL_BASE="${URL%%\?*}"
+
+case "$URL" in
+    # Video — open in mpv
+    *youtube.com/watch*|*youtu.be/*|*twitch.tv/*|\
+    *v.redd.it/*|*clips.twitch.tv/*)
+        setsid -f mpv --really-quiet "$URL" >/dev/null 2>&1
+        ;;
+    # Reddit/Imgur image hosts — always images
+    *i.redd.it/*|*preview.redd.it/*|*i.imgur.com/*)
+        curl -sL "$URL" | setsid -f imv - >/dev/null 2>&1
+        ;;
+    # Everything else — check extension after stripping query string
+    *)
+        case "$URL_BASE" in
+            *.mp4|*.mkv|*.webm|*.m3u8)
+                setsid -f mpv --really-quiet "$URL" >/dev/null 2>&1
+                ;;
+            *.png|*.jpg|*.jpeg|*.gif|*.webp|*.svg|*.bmp)
+                curl -sL "$URL" | setsid -f imv - >/dev/null 2>&1
+                ;;
+            *.mp3|*.flac|*.ogg|*.opus|*.m4a)
+                setsid -f mpv --no-video --really-quiet "$URL" >/dev/null 2>&1
+                ;;
+            *)
+                setsid -f firefox "$URL" >/dev/null 2>&1
+                ;;
+        esac
+        ;;
+esac

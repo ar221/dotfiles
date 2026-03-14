@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# reddit-img — extract and display full-res image from a Reddit post
+# Usage: reddit-img <reddit-url>
+#        echo "<html content>" | reddit-img --html
+
+readonly VIEWER="imv"
+
+die() { printf '[\e[31mERROR\e[0m] %s\n' "$*" >&2; exit 1; }
+
+open_image() {
+    local url="$1"
+    [[ -z "$url" ]] && die "No image URL found"
+
+    # For galleries, open all images
+    if [[ "$url" == *$'\n'* ]]; then
+        local tmpdir
+        tmpdir=$(mktemp -d)
+        trap 'rm -rf "$tmpdir"' EXIT
+        local i=0
+        while IFS= read -r img_url; do
+            [[ -z "$img_url" ]] && continue
+            curl -sL "$img_url" -o "$tmpdir/img_$((i++)).jpg" &
+        done <<< "$url"
+        wait
+        setsid -f $VIEWER "$tmpdir"/* >/dev/null 2>&1 &
+        sleep 1  # let imv load before trap cleans up
+    else
+        curl -sL "$url" | setsid -f $VIEWER - >/dev/null 2>&1
+    fi
+}
+
+# Mode 1: extract from piped HTML content (newsboat pipe-to)
+if [[ "${1:-}" == "--html" ]]; then
+    html=$(cat)
+    # Extract image URLs from HTML content — look for i.redd.it, preview.redd.it, i.imgur.com
+    img_url=$(echo "$html" | grep -oP 'https?://(i\.redd\.it|preview\.redd\.it|i\.imgur\.com)/[^\s"<>]+' | head -1)
+    # Strip HTML entities and resize params for preview URLs
+    img_url="${img_url%%\?*}"
+    open_image "$img_url"
+    exit 0
+fi
+
+# Mode 2: fetch from Reddit JSON API
+readonly URL="${1:?Usage: reddit-img <reddit-url>}"
+
+# Validate it's a Reddit URL
+[[ "$URL" == *reddit.com/* ]] || [[ "$URL" == *redd.it/* ]] || die "Not a Reddit URL: $URL"
+
+# Direct image links — just open them
+if [[ "$URL" == *i.redd.it/* ]] || [[ "$URL" == *preview.redd.it/* ]]; then
+    open_image "${URL%%\?*}"
+    exit 0
+fi
+
+# Fetch the post JSON
+json_url="${URL%.json}"
+json_url="${json_url%/}"
+json_url="${json_url}.json"
+
+json=$(curl -sL -H "User-Agent: newsboat-reddit-img/1.0" "$json_url" 2>/dev/null) || die "Failed to fetch: $json_url"
+
+# Try to extract image URL(s) from JSON
+# Check for gallery first
+if echo "$json" | python3 -c "
+import json, sys
+data = json.loads(sys.stdin.read())
+post = data[0]['data']['children'][0]['data']
+
+# Gallery posts
+if post.get('is_gallery') and post.get('media_metadata'):
+    urls = []
+    for item in post.get('gallery_data', {}).get('items', []):
+        mid = item['media_id']
+        meta = post['media_metadata'].get(mid, {})
+        if meta.get('s', {}).get('u'):
+            urls.append(meta['s']['u'].replace('&amp;', '&'))
+    if urls:
+        print('\n'.join(urls))
+        sys.exit(0)
+
+# Single image — try url_overridden_by_dest first (usually the direct link)
+url = post.get('url_overridden_by_dest', '')
+if any(h in url for h in ['i.redd.it', 'i.imgur.com', 'preview.redd.it']):
+    print(url.replace('&amp;', '&'))
+    sys.exit(0)
+
+# Fallback to preview images
+preview = post.get('preview', {}).get('images', [])
+if preview:
+    print(preview[0]['source']['url'].replace('&amp;', '&'))
+    sys.exit(0)
+
+sys.exit(1)
+" 2>/dev/null; then
+    img_urls=$(echo "$json" | python3 -c "
+import json, sys
+data = json.loads(sys.stdin.read())
+post = data[0]['data']['children'][0]['data']
+if post.get('is_gallery') and post.get('media_metadata'):
+    for item in post.get('gallery_data', {}).get('items', []):
+        mid = item['media_id']
+        meta = post['media_metadata'].get(mid, {})
+        if meta.get('s', {}).get('u'):
+            print(meta['s']['u'].replace('&amp;', '&'))
+else:
+    url = post.get('url_overridden_by_dest', '')
+    if any(h in url for h in ['i.redd.it', 'i.imgur.com', 'preview.redd.it']):
+        print(url.replace('&amp;', '&'))
+    else:
+        preview = post.get('preview', {}).get('images', [])
+        if preview:
+            print(preview[0]['source']['url'].replace('&amp;', '&'))
+" 2>/dev/null)
+    open_image "$img_urls"
+else
+    die "No image found in post (might be a text/video/link post)"
+fi

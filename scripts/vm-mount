@@ -1,0 +1,429 @@
+#!/usr/bin/env fish
+# vm-mount — Mount partitions from qcow2/raw VM disk images via qemu-nbd
+
+set -g VM_MOUNT_VERSION "1.0.0"
+set -g VM_MOUNT_BASE /mnt/vm
+set -g VM_SEARCH_DIRS /mnt/hdd/VMStorage /var/lib/libvirt/images
+set -g VM_IMAGE_EXTS qcow2 img raw qed vdi vmdk
+
+# ─── Helpers ─────────────────────────────────────────────
+function _vm_info
+    printf '[\e[34mINFO\e[0m]  %s\n' "$argv"
+end
+
+function _vm_warn
+    printf '[\e[33mWARN\e[0m]  %s\n' "$argv" >&2
+end
+
+function _vm_error
+    printf '[\e[31mERROR\e[0m] %s\n' "$argv" >&2
+end
+
+function _vm_die
+    _vm_error $argv
+    exit 1
+end
+
+function _vm_usage
+    echo "Usage: vm-mount [COMMAND] [OPTIONS]"
+    echo ""
+    echo "Mount partitions from VM disk images (qcow2, raw, etc.) via qemu-nbd."
+    echo ""
+    echo "Commands:"
+    echo "  list              List available VM disk images"
+    echo "  mount <image>     Connect image and mount its partitions"
+    echo "  umount <image>    Unmount partitions and disconnect image"
+    echo "  status            Show currently mounted VM images"
+    echo ""
+    echo "Options:"
+    echo "  -p, --partition N Mount only partition N (default: all)"
+    echo "  -r, --readonly    Mount read-only"
+    echo "  -n, --dry-run     Show what would be done"
+    echo "  -h, --help        Show this help"
+    echo "  -V, --version     Show version"
+    echo ""
+    echo "Search dirs: $VM_SEARCH_DIRS"
+    echo "Mount point: $VM_MOUNT_BASE/<image-name>/p<N>"
+end
+
+# ─── Find available nbd device ───────────────────────────
+function _vm_find_free_nbd
+    for i in (seq 0 15)
+        set -l dev /dev/nbd$i
+        if test -b $dev; and not test -e /sys/block/nbd$i/pid
+            echo $dev
+            return 0
+        end
+    end
+    return 1
+end
+
+# ─── Find which nbd device an image is connected to ─────
+function _vm_find_nbd_for_image
+    set -l image (realpath "$argv[1]" 2>/dev/null; or echo "$argv[1]")
+    for i in (seq 0 15)
+        if test -e /sys/block/nbd$i/pid
+            set -l nbd_pid (cat /sys/block/nbd$i/pid 2>/dev/null)
+            if test -n "$nbd_pid"
+                set -l cmdline (cat /proc/$nbd_pid/cmdline 2>/dev/null | tr '\0' ' ')
+                if string match -q -- "*$image*" "$cmdline"
+                    echo /dev/nbd$i
+                    return 0
+                end
+            end
+        end
+    end
+    return 1
+end
+
+# ─── Resolve image path from name or path ────────────────
+function _vm_resolve_image
+    set -l input "$argv[1]"
+
+    if test -f "$input"
+        echo "$input"
+        return 0
+    end
+
+    for dir in $VM_SEARCH_DIRS
+        if test -f "$dir/$input"
+            echo "$dir/$input"
+            return 0
+        end
+        for ext in $VM_IMAGE_EXTS
+            if test -f "$dir/$input.$ext"
+                echo "$dir/$input.$ext"
+                return 0
+            end
+        end
+    end
+
+    return 1
+end
+
+# ─── Ensure nbd module is loaded ─────────────────────────
+function _vm_ensure_nbd
+    if not lsmod | grep -q '^nbd '
+        _vm_info "Loading nbd kernel module..."
+        sudo modprobe nbd max_part=16
+        or _vm_die "Failed to load nbd module"
+        sleep 0.5
+    end
+end
+
+# ─── List command ────────────────────────────────────────
+function _vm_cmd_list
+    for dir in $VM_SEARCH_DIRS
+        if not test -d "$dir"
+            _vm_warn "$dir does not exist"
+            continue
+        end
+        echo ""
+        printf '\e[1m%s\e[0m\n' "$dir"
+        set -l found 0
+        for f in $dir/*
+            if not test -f "$f"
+                continue
+            end
+            # Check extension
+            set -l ext (string match -r '\.([^.]+)$' "$f")
+            if not contains -- "$ext[2]" $VM_IMAGE_EXTS
+                continue
+            end
+            set -l size (du -h "$f" | cut -f1)
+            set -l fmt (qemu-img info --output=json "$f" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('format','unknown'))" 2>/dev/null; or echo "unknown")
+            set -l vsize (qemu-img info --output=json "$f" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'{d[\"virtual-size\"]/1073741824:.0f}G')" 2>/dev/null; or echo "?")
+            printf '  %-30s %6s / %s virtual  (%s)\n' (basename "$f") "$size" "$vsize" "$fmt"
+            set found 1
+        end
+        if test $found -eq 0
+            echo "  (no images found)"
+        end
+    end
+    echo ""
+end
+
+# ─── Mount command ───────────────────────────────────────
+function _vm_cmd_mount
+    set -l image_input "$argv[1]"
+    set -l partition "$argv[2]"
+    set -l ro "$argv[3]"
+    set -l dry "$argv[4]"
+
+    if test -z "$image_input"
+        _vm_die "Usage: vm-mount mount <image> [-p N] [-r] [-n]"
+    end
+
+    set -l image (_vm_resolve_image "$image_input")
+    or _vm_die "Image not found: $image_input"
+
+    _vm_info "Image: $image"
+
+    # Check if already connected
+    set -l nbd_dev
+    if set nbd_dev (_vm_find_nbd_for_image "$image")
+        _vm_info "Already connected on $nbd_dev"
+    else
+        _vm_ensure_nbd
+
+        set nbd_dev (_vm_find_free_nbd)
+        or _vm_die "No free nbd device found (all /dev/nbd0-15 in use)"
+
+        _vm_info "Connecting to $nbd_dev..."
+
+        set -l nbd_opts
+        if test "$ro" = 1
+            set -a nbd_opts --read-only
+        end
+
+        if test "$dry" = 1
+            _vm_info "[dry-run] sudo qemu-nbd --connect=$nbd_dev $nbd_opts $image"
+            _vm_info "[dry-run] Would mount partitions under $VM_MOUNT_BASE/"
+            return 0
+        end
+
+        sudo qemu-nbd --connect=$nbd_dev $nbd_opts "$image"
+        or _vm_die "Failed to connect $image to $nbd_dev"
+
+        sleep 1
+        sudo partprobe $nbd_dev 2>/dev/null
+        sleep 0.5
+    end
+
+    # Discover partitions
+    set -l nbd_base (basename $nbd_dev)
+    set -l parts (lsblk -ln -o NAME $nbd_dev 2>/dev/null | string match -v "$nbd_base")
+    if test (count $parts) -eq 0
+        _vm_warn "No partitions found on $nbd_dev — image may be unpartitioned or empty"
+        _vm_info "Device is still connected at $nbd_dev for manual inspection"
+        return 1
+    end
+
+    set -l img_name (basename "$image" | string replace -r '\.[^.]+$' '')
+
+    _vm_info "Found "(count $parts)" partition(s):"
+    for p in $parts
+        set -l pinfo (lsblk -ln -o NAME,SIZE,FSTYPE /dev/$p 2>/dev/null)
+        printf '  /dev/%s\n' "$pinfo"
+    end
+
+    # Mount partitions
+    set -l mounted 0
+    for p in $parts
+        set -l pnum (string replace -r '.*p' '' "$p")
+
+        if test -n "$partition"; and test "$pnum" != "$partition"
+            continue
+        end
+
+        set -l fstype (lsblk -ln -o FSTYPE /dev/$p 2>/dev/null | string trim)
+        if test -z "$fstype"
+            _vm_warn "Partition /dev/$p has no recognized filesystem, skipping"
+            continue
+        end
+
+        set -l mnt "$VM_MOUNT_BASE/$img_name/p$pnum"
+
+        if test "$dry" = 1
+            _vm_info "[dry-run] Would mount /dev/$p ($fstype) at $mnt"
+            set mounted (math $mounted + 1)
+            continue
+        end
+
+        sudo mkdir -p "$mnt"
+
+        set -l mount_opts
+        if test "$ro" = 1
+            set mount_opts -o ro
+        end
+
+        # NTFS needs ntfs3 driver
+        if test "$fstype" = ntfs
+            set -a mount_opts -t ntfs3
+        end
+
+        if sudo mount $mount_opts /dev/$p "$mnt" 2>/dev/null
+            set -l sz (df -h "$mnt" | tail -1 | awk '{print $3"/"$2" ("$5" used)"}')
+            _vm_info "Mounted /dev/$p ($fstype) -> $mnt  [$sz]"
+            set mounted (math $mounted + 1)
+        else
+            _vm_warn "Failed to mount /dev/$p ($fstype) at $mnt"
+            if test "$ro" != 1
+                if sudo mount -o ro /dev/$p "$mnt" 2>/dev/null
+                    _vm_info "Mounted /dev/$p ($fstype) -> $mnt  [read-only fallback]"
+                    set mounted (math $mounted + 1)
+                end
+            end
+        end
+    end
+
+    if test $mounted -eq 0
+        _vm_warn "No partitions were mounted"
+        return 1
+    end
+
+    _vm_info "$mounted partition(s) mounted under $VM_MOUNT_BASE/$img_name/"
+end
+
+# ─── Unmount command ─────────────────────────────────────
+function _vm_cmd_umount
+    set -l image_input "$argv[1]"
+    set -l dry "$argv[2]"
+
+    if test -z "$image_input"
+        _vm_die "Usage: vm-mount umount <image>"
+    end
+
+    set -l image (_vm_resolve_image "$image_input")
+    or set image "$image_input"
+
+    set -l img_name (basename "$image" | string replace -r '\.[^.]+$' '')
+    set -l mnt_dir "$VM_MOUNT_BASE/$img_name"
+
+    set -l nbd_dev (_vm_find_nbd_for_image "$image")
+
+    # Unmount all partitions for this image
+    if test -d "$mnt_dir"
+        for mnt in $mnt_dir/p*
+            if mountpoint -q "$mnt" 2>/dev/null
+                if test "$dry" = 1
+                    _vm_info "[dry-run] Would unmount $mnt"
+                else
+                    _vm_info "Unmounting $mnt..."
+                    sudo umount "$mnt"
+                    or _vm_warn "Failed to unmount $mnt (busy?)"
+                end
+            end
+        end
+        if test "$dry" != 1
+            sudo rm -rf "$mnt_dir"
+        end
+    end
+
+    # Also check for any mounts from the nbd device directly
+    if test -n "$nbd_dev"
+        for mnt in (mount | grep "$nbd_dev" | awk '{print $3}')
+            if test "$dry" = 1
+                _vm_info "[dry-run] Would unmount $mnt"
+            else
+                _vm_info "Unmounting $mnt..."
+                sudo umount "$mnt"
+            end
+        end
+    end
+
+    # Disconnect nbd
+    if test -n "$nbd_dev"
+        if test "$dry" = 1
+            _vm_info "[dry-run] Would disconnect $nbd_dev"
+        else
+            _vm_info "Disconnecting $nbd_dev..."
+            sudo qemu-nbd --disconnect $nbd_dev
+            or _vm_warn "Failed to disconnect $nbd_dev"
+            _vm_info "Done."
+        end
+    else
+        _vm_warn "Could not find nbd device for $image — may already be disconnected"
+    end
+end
+
+# ─── Status command ──────────────────────────────────────
+function _vm_cmd_status
+    set -l found 0
+
+    for i in (seq 0 15)
+        if test -e /sys/block/nbd$i/pid
+            set -l nbd_pid (cat /sys/block/nbd$i/pid 2>/dev/null)
+            if test -n "$nbd_pid"
+                set -l cmdline (cat /proc/$nbd_pid/cmdline 2>/dev/null | tr '\0' ' ')
+                set -l image (string match -r -- '/[^ ]+\.(qcow2|img|raw|qed|vdi|vmdk)' "$cmdline")
+
+                printf '\e[1m/dev/nbd%s\e[0m' "$i"
+                if test -n "$image[1]"
+                    printf ' <- %s' "$image[1]"
+                end
+                echo ""
+
+                for p in (lsblk -ln -o NAME,SIZE,FSTYPE,MOUNTPOINT /dev/nbd$i 2>/dev/null | tail -n +2)
+                    printf '  %s\n' "$p"
+                end
+                set found 1
+            end
+        end
+    end
+
+    if test $found -eq 0
+        _vm_info "No VM images currently connected."
+    end
+
+    if test -d "$VM_MOUNT_BASE"
+        set -l mounts (find $VM_MOUNT_BASE -maxdepth 2 -type d -name 'p*' 2>/dev/null)
+        if test (count $mounts) -gt 0
+            echo ""
+            _vm_info "Mount points under $VM_MOUNT_BASE/:"
+            for m in $mounts
+                if mountpoint -q "$m" 2>/dev/null
+                    set -l usage (df -h "$m" | tail -1 | awk '{print $3"/"$2" ("$5")"}')
+                    printf '  %s  [%s]\n' "$m" "$usage"
+                else
+                    printf '  %s  [not mounted]\n' "$m"
+                end
+            end
+        end
+    end
+end
+
+# ─── Argument Parsing ────────────────────────────────────
+set -l cmd ""
+set -l partition ""
+set -l readonly 0
+set -l dry_run 0
+set -l positional
+
+set -l skip_next 0
+for i in (seq (count $argv))
+    if test $skip_next -eq 1
+        set skip_next 0
+        continue
+    end
+
+    switch "$argv[$i]"
+        case -p --partition
+            set partition "$argv[(math $i + 1)]"
+            set skip_next 1
+        case -r --readonly
+            set readonly 1
+        case -n --dry-run
+            set dry_run 1
+        case -h --help
+            _vm_usage
+            exit 0
+        case -V --version
+            echo $VM_MOUNT_VERSION
+            exit 0
+        case list mount umount unmount status
+            set cmd "$argv[$i]"
+        case '-*'
+            _vm_die "Unknown option: $argv[$i]"
+        case '*'
+            set -a positional "$argv[$i]"
+    end
+end
+
+if test "$cmd" = unmount
+    set cmd umount
+end
+
+switch "$cmd"
+    case list
+        _vm_cmd_list
+    case mount
+        _vm_cmd_mount "$positional[1]" "$partition" "$readonly" "$dry_run"
+    case umount
+        _vm_cmd_umount "$positional[1]" "$dry_run"
+    case status
+        _vm_cmd_status
+    case ''
+        _vm_usage
+        exit 1
+end

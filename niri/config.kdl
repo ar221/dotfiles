@@ -294,6 +294,7 @@ binds {
     // Dictation (push-to-talk toggle)
     Mod+Shift+M hotkey-overlay-title="Dictation Toggle" { spawn "bash" "-c" "$HOME/.local/bin/dictate toggle"; }
     Mod+Ctrl+M hotkey-overlay-title="Dictation RP Toggle" { spawn "bash" "-c" "$HOME/.local/bin/dictate --rp toggle"; }
+    Mod+Ctrl+Shift+M hotkey-overlay-title="Dictation RP+ Toggle" { spawn "bash" "-c" "$HOME/.local/bin/dictate --rp+ toggle"; }
 
     // Notification Center
     Mod+N hotkey-overlay-title="ii Notifications" { spawn "qs" "-c" "ii" "ipc" "call" "notifications" "toggle"; }

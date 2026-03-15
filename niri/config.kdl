@@ -291,6 +291,10 @@ binds {
     // Night Light
     Mod+Shift+N hotkey-overlay-title="ii Night Light" { spawn "qs" "-c" "ii" "ipc" "call" "nightlight" "toggle"; }
 
+    // Dictation (push-to-talk toggle)
+    Mod+Shift+M hotkey-overlay-title="Dictation Toggle" { spawn "bash" "-c" "$HOME/.local/bin/dictate toggle"; }
+    Mod+Ctrl+M hotkey-overlay-title="Dictation RP Toggle" { spawn "bash" "-c" "$HOME/.local/bin/dictate --rp toggle"; }
+
     // Notification Center
     Mod+N hotkey-overlay-title="ii Notifications" { spawn "qs" "-c" "ii" "ipc" "call" "notifications" "toggle"; }
     Mod+Shift+D hotkey-overlay-title="Clear Notifications" { spawn "qs" "-c" "ii" "ipc" "call" "notifications" "clearAll"; }

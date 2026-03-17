@@ -1,0 +1,367 @@
+#!/usr/bin/env bash
+set -euo pipefail
+trap '' PIPE
+
+# ─── Config ──────────────────────────────────────────────
+readonly SCRIPT_NAME="$(basename "$0")"
+readonly VERSION="1.0.0"
+readonly WORKSHOP_DIR="$HOME/.local/share/Steam/steamapps/workshop/content/431960"
+readonly SCREENSHOT_DIR="/tmp/we-wall"
+readonly STATE_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/we-wall/current"
+readonly SWITCHWALL="$HOME/.config/quickshell/ii/scripts/colors/switchwall.sh"
+readonly SHELL_CONFIG="$HOME/.config/illogical-impulse/config.json"
+
+# Fix LD_LIBRARY_PATH for linux-wallpaperengine
+export LD_LIBRARY_PATH="/opt/linux-wallpaperengine:/opt/linux-wallpaperengine/lib:${LD_LIBRARY_PATH:-}"
+readonly LWE_BIN="/opt/linux-wallpaperengine/linux-wallpaperengine"
+
+# ─── Helpers ─────────────────────────────────────────────
+info()  { printf '[\e[34mINFO\e[0m]  %s\n' "$*" || true; }
+warn()  { printf '[\e[33mWARN\e[0m]  %s\n' "$*" >&2; }
+error() { printf '[\e[31mERROR\e[0m] %s\n' "$*" >&2; }
+die()   { error "$@"; exit 1; }
+
+usage() {
+    cat <<EOF
+Usage: $SCRIPT_NAME [OPTIONS] [WALLPAPER_ID]
+
+Wallpaper Engine integration for niri + matugen theming pipeline.
+
+Commands:
+    (no args)        Pick a random wallpaper
+    <ID>             Set a specific workshop wallpaper by ID
+    --list           List all available wallpapers
+    --stop           Stop the current WE wallpaper
+    --current        Show current WE wallpaper info
+
+Options:
+    --fps N          Frame rate limit (default: 30)
+    --no-theme       Skip matugen color generation
+    --screenshot     Use native WE screenshot for colors (default)
+    --no-screenshot  Use preview image instead of native screenshot
+    -n, --dry-run    Show what would be done without doing it
+    -h, --help       Show this help message
+    -V, --version    Show version
+EOF
+}
+
+# ─── Quickshell Config Integration ────────────────────────
+set_external_wallpaper_flag() {
+    local active="$1"  # true or false
+    if [[ -f "$SHELL_CONFIG" ]]; then
+        jq --argjson active "$active" '.background.externalWallpaper = $active' \
+            "$SHELL_CONFIG" > "${SHELL_CONFIG}.tmp" && mv "${SHELL_CONFIG}.tmp" "$SHELL_CONFIG"
+    fi
+}
+
+# ─── Wallpaper Library ───────────────────────────────────
+get_wallpaper_ids() {
+    if [[ ! -d "$WORKSHOP_DIR" ]]; then
+        die "Workshop directory not found: $WORKSHOP_DIR"
+    fi
+    local ids=()
+    for dir in "$WORKSHOP_DIR"/*/; do
+        [[ -f "${dir}project.json" ]] && ids+=("$(basename "$dir")")
+    done
+    printf '%s\n' "${ids[@]}"
+}
+
+get_wallpaper_info() {
+    local id="$1"
+    local project="$WORKSHOP_DIR/$id/project.json"
+    [[ -f "$project" ]] || return 1
+    python3 -c "
+import json, sys
+d = json.load(open('$project'))
+title = d.get('title', 'Unknown')
+wtype = d.get('type', 'unknown')
+tags = ', '.join(d.get('tags', []))
+print(f'{title}|{wtype}|{tags}')
+" 2>/dev/null
+}
+
+get_preview_image() {
+    local id="$1"
+    local dir="$WORKSHOP_DIR/$id"
+    # Prefer jpg over gif for matugen compatibility
+    if [[ -f "$dir/preview.jpg" ]]; then
+        echo "$dir/preview.jpg"
+    elif [[ -f "$dir/preview.gif" ]]; then
+        echo "$dir/preview.gif"
+    elif [[ -f "$dir/preview.png" ]]; then
+        echo "$dir/preview.png"
+    fi
+}
+
+list_wallpapers() {
+    local current_id=""
+    [[ -f "$STATE_FILE" ]] && current_id=$(cat "$STATE_FILE" 2>/dev/null)
+
+    printf '\e[1m%-14s %-8s %-45s %s\e[0m\n' "ID" "TYPE" "TITLE" "TAGS"
+    printf '%.0s─' {1..100}; echo
+
+    while IFS= read -r id; do
+        local info
+        info=$(get_wallpaper_info "$id") || continue
+        IFS='|' read -r title wtype tags <<< "$info"
+        local marker=""
+        [[ "$id" == "$current_id" ]] && marker=" \e[32m◄\e[0m"
+        printf "%-14s %-8s %-45s %s${marker}\n" "$id" "$wtype" "${title:0:45}" "${tags:0:30}"
+    done < <(get_wallpaper_ids)
+}
+
+pick_random_id() {
+    local ids
+    mapfile -t ids < <(get_wallpaper_ids)
+    local count=${#ids[@]}
+    [[ $count -eq 0 ]] && die "No wallpapers found in $WORKSHOP_DIR"
+
+    # Avoid picking the current wallpaper if possible
+    local current_id=""
+    [[ -f "$STATE_FILE" ]] && current_id=$(cat "$STATE_FILE" 2>/dev/null)
+
+    local attempts=0
+    local picked
+    while true; do
+        picked="${ids[$((RANDOM % count))]}"
+        # If only 1 wallpaper or we've tried enough, just use it
+        if [[ $count -le 1 || "$picked" != "$current_id" || $attempts -ge 5 ]]; then
+            break
+        fi
+        ((attempts++))
+    done
+    echo "$picked"
+}
+
+# ─── Detect Monitor ─────────────────────────────────────
+get_monitor() {
+    local output
+    output=$(niri msg outputs 2>/dev/null) || return 1
+    echo "$output" | head -1 | grep -oP '\((\S+)\)' | tr -d '()'
+}
+
+# ─── Process Management ─────────────────────────────────
+stop_wallpaper() {
+    if pkill -f "linux-wallpaperengine" 2>/dev/null; then
+        # Brief pause for cleanup
+        sleep 0.3
+        info "Stopped previous WE wallpaper"
+        return 0
+    fi
+    return 1
+}
+
+save_state() {
+    local id="$1"
+    mkdir -p "$(dirname "$STATE_FILE")"
+    echo "$id" > "$STATE_FILE"
+}
+
+# ─── Theme Integration ──────────────────────────────────
+wait_for_screenshot() {
+    local output="$1"
+    local max_wait="${2:-25}"
+    local waited=0
+    while [[ $waited -lt $max_wait ]]; do
+        if [[ -f "$output" && $(stat -c%s "$output" 2>/dev/null || echo 0) -gt 1000 ]]; then
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    return 1
+}
+
+get_theme_image() {
+    local id="$1"
+    local use_screenshot="$2"
+    local image
+
+    mkdir -p "$SCREENSHOT_DIR"
+
+    if [[ "$use_screenshot" == "1" ]]; then
+        # The main WE process was launched with --screenshot; wait for the file
+        local ss_path="$SCREENSHOT_DIR/we-native-${id}.png"
+        info "Waiting for native WE screenshot..." >&2
+        if wait_for_screenshot "$ss_path" 25; then
+            image="$ss_path"
+        else
+            warn "Native screenshot timed out, falling back to preview"
+            image=$(get_preview_image "$id")
+        fi
+    else
+        image=$(get_preview_image "$id")
+    fi
+
+    # For GIF previews, extract first frame for matugen
+    if [[ -n "$image" && "$image" == *.gif ]]; then
+        local jpg_path="$SCREENSHOT_DIR/we-preview-${id}.jpg"
+        if command -v magick &>/dev/null; then
+            magick "${image}[0]" "$jpg_path" 2>/dev/null
+        elif command -v ffmpeg &>/dev/null; then
+            ffmpeg -y -i "$image" -vframes 1 "$jpg_path" 2>/dev/null
+        else
+            warn "Cannot convert GIF preview — need imagemagick or ffmpeg"
+            echo ""
+            return 1
+        fi
+        image="$jpg_path"
+    fi
+
+    echo "$image"
+}
+
+apply_theme_from_image() {
+    local image="$1"
+    if [[ -z "$image" || ! -f "$image" ]]; then
+        warn "No image found for color generation"
+        return 1
+    fi
+    info "Generating colors from: $(basename "$image")"
+    if [[ -x "$SWITCHWALL" ]]; then
+        "$SWITCHWALL" --image "$image" --noswitch &
+    else
+        warn "switchwall.sh not found at $SWITCHWALL"
+    fi
+}
+
+# ─── Notification ────────────────────────────────────────
+send_notification() {
+    local id="$1"
+    local info_str
+    info_str=$(get_wallpaper_info "$id") || return
+    IFS='|' read -r title wtype tags <<< "$info_str"
+
+    local preview
+    preview=$(get_preview_image "$id")
+
+    local icon_arg=()
+    if [[ -n "$preview" && -f "$preview" ]]; then
+        icon_arg=(-i "$preview")
+    fi
+
+    notify-send "${icon_arg[@]}" "Wallpaper Engine" "$title ($wtype)" 2>/dev/null || true
+}
+
+# ─── Main ────────────────────────────────────────────────
+main() {
+    local fps=30
+    local no_theme=0
+    local use_screenshot=1
+    local dry_run=0
+    local wallpaper_id=""
+    local action=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --list)        action="list"; shift ;;
+            --stop)        action="stop"; shift ;;
+            --current)     action="current"; shift ;;
+            --fps)         fps="$2"; shift 2 ;;
+            --no-theme)    no_theme=1; shift ;;
+            --screenshot)  use_screenshot=1; shift ;;
+            --no-screenshot) use_screenshot=0; shift ;;
+            -n|--dry-run)  dry_run=1; shift ;;
+            -h|--help)     usage; exit 0 ;;
+            -V|--version)  echo "$VERSION"; exit 0 ;;
+            --)            shift; break ;;
+            -*)            die "Unknown option: $1" ;;
+            *)             wallpaper_id="$1"; shift ;;
+        esac
+    done
+
+    # Handle actions
+    case "${action:-}" in
+        list)
+            list_wallpapers
+            return 0
+            ;;
+        stop)
+            stop_wallpaper || info "No WE wallpaper running"
+            set_external_wallpaper_flag false
+            info "Restored Quickshell wallpaper"
+            return 0
+            ;;
+        current)
+            if [[ -f "$STATE_FILE" ]]; then
+                local cid
+                cid=$(cat "$STATE_FILE")
+                local cinfo
+                cinfo=$(get_wallpaper_info "$cid") || die "Unknown wallpaper: $cid"
+                IFS='|' read -r title wtype tags <<< "$cinfo"
+                echo "$cid — $title ($wtype)"
+            else
+                echo "No WE wallpaper active"
+            fi
+            return 0
+            ;;
+    esac
+
+    # Pick wallpaper
+    if [[ -z "$wallpaper_id" ]]; then
+        wallpaper_id=$(pick_random_id)
+    fi
+
+    # Validate
+    if [[ ! -d "$WORKSHOP_DIR/$wallpaper_id" ]]; then
+        die "Wallpaper not found: $wallpaper_id"
+    fi
+
+    local wall_info
+    wall_info=$(get_wallpaper_info "$wallpaper_id") || die "Cannot read wallpaper info"
+    IFS='|' read -r title wtype tags <<< "$wall_info"
+
+    local monitor
+    monitor=$(get_monitor)
+    [[ -z "$monitor" ]] && die "Cannot detect monitor from niri"
+
+    if [[ $dry_run -eq 1 ]]; then
+        info "[DRY RUN] Would set: $title ($wtype) [ID: $wallpaper_id]"
+        info "[DRY RUN] Monitor: $monitor, FPS: $fps"
+        return 0
+    fi
+
+    info "Setting: $title ($wtype)"
+    info "ID: $wallpaper_id | Monitor: $monitor | FPS: $fps"
+
+    # Stop any existing WE wallpaper
+    stop_wallpaper || true
+
+    # Tell Quickshell to hide its wallpaper layers
+    set_external_wallpaper_flag true
+
+    # Build WE launch args — include --screenshot if we want native color extraction
+    local screenshot_path="$SCREENSHOT_DIR/we-native-${wallpaper_id}.png"
+    local screenshot_args=()
+    if [[ $no_theme -eq 0 && $use_screenshot -eq 1 ]]; then
+        rm -f "$screenshot_path"
+        mkdir -p "$SCREENSHOT_DIR"
+        screenshot_args=(--screenshot "$screenshot_path" --screenshot-delay 60)
+    fi
+
+    # Launch wallpaper engine in a detached subshell
+    (
+        cd /opt/linux-wallpaperengine
+        exec "$LWE_BIN" \
+            --silent \
+            --fps "$fps" \
+            --screen-root "$monitor" \
+            "${screenshot_args[@]}" \
+            "$wallpaper_id" &>/dev/null
+    ) &
+    disown
+
+    save_state "$wallpaper_id"
+    send_notification "$wallpaper_id"
+
+    # Apply theme colors
+    if [[ $no_theme -eq 0 ]]; then
+        local theme_image
+        theme_image=$(get_theme_image "$wallpaper_id" "$use_screenshot")
+        apply_theme_from_image "$theme_image"
+    fi
+
+    info "Done."
+}
+
+main "$@"

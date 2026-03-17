@@ -31,6 +31,7 @@ Commands:
     (no args)        Pick a random wallpaper
     <ID>             Set a specific workshop wallpaper by ID
     --list           List all available wallpapers
+    --list-json      List wallpapers as JSON (for Quickshell integration)
     --stop           Stop the current WE wallpaper
     --current        Show current WE wallpaper info
 
@@ -91,6 +92,37 @@ get_preview_image() {
     elif [[ -f "$dir/preview.png" ]]; then
         echo "$dir/preview.png"
     fi
+}
+
+list_wallpapers_json() {
+    local current_id=""
+    [[ -f "$STATE_FILE" ]] && current_id=$(cat "$STATE_FILE" 2>/dev/null)
+
+    python3 -c "
+import json, os
+workshop = '$WORKSHOP_DIR'
+current = '$current_id'
+result = []
+for d in sorted(os.listdir(workshop)):
+    pj = os.path.join(workshop, d, 'project.json')
+    if not os.path.isfile(pj): continue
+    try:
+        data = json.load(open(pj))
+    except: continue
+    preview = ''
+    for ext in ['jpg','png','gif']:
+        p = os.path.join(workshop, d, f'preview.{ext}')
+        if os.path.isfile(p): preview = p; break
+    result.append({
+        'id': d,
+        'title': data.get('title','Unknown'),
+        'type': data.get('type','unknown'),
+        'tags': ', '.join(data.get('tags',[])),
+        'preview': preview,
+        'active': d == current,
+    })
+print(json.dumps(result))
+"
 }
 
 list_wallpapers() {
@@ -219,7 +251,7 @@ apply_theme_from_image() {
     fi
     info "Generating colors from: $(basename "$image")"
     if [[ -x "$SWITCHWALL" ]]; then
-        "$SWITCHWALL" --image "$image" --noswitch &
+        "$SWITCHWALL" --image "$image" --skip-config-write &
     else
         warn "switchwall.sh not found at $SWITCHWALL"
     fi
@@ -245,7 +277,7 @@ send_notification() {
 
 # ─── Main ────────────────────────────────────────────────
 main() {
-    local fps=30
+    local fps=60
     local no_theme=0
     local use_screenshot=1
     local dry_run=0
@@ -255,6 +287,7 @@ main() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --list)        action="list"; shift ;;
+            --list-json)   action="list-json"; shift ;;
             --stop)        action="stop"; shift ;;
             --current)     action="current"; shift ;;
             --fps)         fps="$2"; shift 2 ;;
@@ -274,6 +307,10 @@ main() {
     case "${action:-}" in
         list)
             list_wallpapers
+            return 0
+            ;;
+        list-json)
+            list_wallpapers_json
             return 0
             ;;
         stop)

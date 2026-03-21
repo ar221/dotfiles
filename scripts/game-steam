@@ -1,0 +1,692 @@
+#!/usr/bin/env python3
+"""game-steam — Add non-Steam games to Steam library with auto-detected tags and artwork.
+
+Searches Steam Store API for game info (name, genres, tags), fetches artwork
+from SteamGridDB, and adds to Steam's shortcuts.vdf. Just point at the exe.
+
+Requires: python-vdf (pacman), secret-tool (keyring)
+SteamGridDB API key: https://www.steamgriddb.com/profile/preferences/api
+"""
+
+import argparse
+import binascii
+import json
+import logging
+import shutil
+import subprocess
+import sys
+import urllib.parse
+import urllib.request
+import urllib.error
+from pathlib import Path
+from typing import Optional
+
+try:
+    import vdf
+except ImportError:
+    print("Error: python-vdf not installed (sudo pacman -S python-vdf)", file=sys.stderr)
+    sys.exit(1)
+
+# --- Constants ---
+
+STEAM_DIR = Path.home() / ".local/share/Steam"
+PREFIXES_DIR = Path.home() / ".local/share/game-prefixes"
+STEAM_SEARCH_API = "https://store.steampowered.com/api/storesearch"
+STEAM_DETAILS_API = "https://store.steampowered.com/api/appdetails"
+SGDB_API = "https://www.steamgriddb.com/api/v2"
+KEYRING_SERVICE = "steamgriddb"
+KEYRING_USERNAME = "api_key"
+
+log = logging.getLogger("game-steam")
+
+
+# --- Helpers ---
+
+def info(msg):
+    print(f"\033[1;34m::\033[0m {msg}")
+
+
+def warn(msg):
+    print(f"\033[1;33m::\033[0m {msg}", file=sys.stderr)
+
+
+def http_get_json(url: str, headers: dict = None, timeout: int = 10) -> Optional[dict]:
+    """GET a URL and return parsed JSON, or None on failure."""
+    req = urllib.request.Request(url, headers=headers or {})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except Exception as e:
+        log.warning("HTTP request failed: %s — %s", url, e)
+        return None
+
+
+def download_file(url: str, dest: Path) -> bool:
+    """Download a file from URL to destination."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "game-steam/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            with open(dest, "wb") as f:
+                f.write(resp.read())
+        return True
+    except Exception as e:
+        log.warning("Download failed: %s — %s", url, e)
+        return False
+
+
+def infer_game_name(exe_path: str) -> str:
+    """Infer a game name from the exe path."""
+    p = Path(exe_path)
+    # Try parent folder name first (more descriptive than exe name usually)
+    folder = p.parent.name
+    exe_stem = p.stem
+
+    # If folder looks like a game name, prefer it
+    # Skip generic folder names
+    generic = {"bin", "x64", "x86", "win64", "win32", "game", "binaries", "build"}
+    if folder.lower() not in generic and len(folder) > 2:
+        return folder
+    return exe_stem
+
+
+# --- Steam User ---
+
+def find_steam_user_id() -> str:
+    """Find the Steam user ID from userdata directory."""
+    userdata = STEAM_DIR / "userdata"
+    if not userdata.exists():
+        raise FileNotFoundError("Steam userdata not found")
+
+    users = [d.name for d in userdata.iterdir() if d.is_dir() and d.name.isdigit()]
+    if not users:
+        raise FileNotFoundError("No Steam users found")
+    if len(users) == 1:
+        return users[0]
+
+    print("Multiple Steam users found:")
+    for i, uid in enumerate(users, 1):
+        print(f"  {i}) {uid}")
+    choice = input(f"Select [1-{len(users)}]: ").strip()
+    return users[int(choice) - 1]
+
+
+# --- Steam Store API ---
+
+def steam_search(query: str) -> Optional[dict]:
+    """Search Steam Store for a game. Returns the selected app details."""
+    encoded = urllib.parse.quote(query)
+    result = http_get_json(f"{STEAM_SEARCH_API}/?term={encoded}&l=english&cc=US")
+    if not result or result.get("total", 0) == 0:
+        return None
+
+    items = result.get("items", [])
+    if not items:
+        return None
+
+    if len(items) == 1:
+        return items[0]
+
+    print(f"\nSteam results for '{query}':")
+    for i, item in enumerate(items[:10], 1):
+        print(f"  {i:2d}) {item['name']} (AppID: {item['id']})")
+    print(f"   0) Skip (enter name manually)")
+
+    choice = input(f"Select [0-{min(len(items), 10)}]: ").strip()
+    if choice == "0":
+        return None
+    idx = int(choice) - 1
+    if 0 <= idx < len(items):
+        return items[idx]
+    return None
+
+
+def steam_get_details(appid: int) -> Optional[dict]:
+    """Get full game details from Steam Store API."""
+    result = http_get_json(f"{STEAM_DETAILS_API}?appids={appid}")
+    if not result:
+        return None
+    app_data = result.get(str(appid), {})
+    if not app_data.get("success"):
+        return None
+    return app_data.get("data")
+
+
+def extract_tags_from_steam(details: dict) -> list:
+    """Extract genre and category tags from Steam app details."""
+    tags = []
+    for genre in details.get("genres", []):
+        tags.append(genre["description"])
+    for cat in details.get("categories", []):
+        desc = cat["description"]
+        # Skip overly generic categories
+        if desc not in {"Single-player", "Multi-player", "Steam Achievements",
+                        "Steam Cloud", "Stats", "Remote Play Together",
+                        "Family Sharing", "Steam Trading Cards"}:
+            tags.append(desc)
+    return tags
+
+
+# --- AppID Calculation ---
+
+def generate_shortcut_id(exe: str, name: str) -> tuple:
+    """Generate a deterministic shortcut ID for a non-Steam game.
+
+    Returns (signed_id, unsigned_id):
+      - signed_id: for vdf binary format (int32)
+      - unsigned_id: for artwork filenames (Steam uses unsigned in grid paths)
+    """
+    key = (exe + name).encode("utf-8")
+    crc = binascii.crc32(key) & 0xFFFFFFFF
+    unsigned = crc | 0x80000000
+    signed = unsigned - 0x100000000 if unsigned >= 0x80000000 else unsigned
+    return signed, unsigned
+
+
+# --- Shortcuts VDF ---
+
+def load_shortcuts(shortcuts_path: Path) -> dict:
+    """Load shortcuts.vdf (binary format)."""
+    if not shortcuts_path.exists():
+        return {"shortcuts": {}}
+    with open(shortcuts_path, "rb") as f:
+        data = f.read()
+    if not data:
+        return {"shortcuts": {}}
+    return vdf.binary_loads(data)
+
+
+def save_shortcuts(shortcuts_path: Path, shortcuts: dict):
+    """Write shortcuts.vdf (binary format). Backs up first."""
+    if shortcuts_path.exists():
+        backup = shortcuts_path.with_suffix(".vdf.bak")
+        shutil.copy2(shortcuts_path, backup)
+    with open(shortcuts_path, "wb") as f:
+        f.write(vdf.binary_dumps(shortcuts))
+
+
+def find_shortcut_by_name(shortcuts: dict, name: str) -> Optional[str]:
+    """Find a shortcut entry key by app name."""
+    for key, entry in shortcuts.get("shortcuts", {}).items():
+        entry_name = entry.get("AppName", entry.get("appname", ""))
+        if entry_name.lower() == name.lower():
+            return key
+    return None
+
+
+def next_shortcut_id(shortcuts: dict) -> str:
+    """Get the next available shortcut index."""
+    existing = shortcuts.get("shortcuts", {})
+    if not existing:
+        return "0"
+    return str(max(int(k) for k in existing.keys()) + 1)
+
+
+# --- SteamGridDB ---
+
+def get_api_key() -> str:
+    """Get SteamGridDB API key from system keyring, or prompt and store it."""
+    try:
+        result = subprocess.run(
+            ["secret-tool", "lookup", "service", KEYRING_SERVICE],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    print("\nSteamGridDB API key not found in keyring.")
+    print("Get one free at: https://www.steamgriddb.com/profile/preferences/api")
+    key = input("Paste your API key: ").strip()
+    if not key:
+        raise ValueError("No API key provided")
+
+    subprocess.run(
+        ["secret-tool", "store", "--label=SteamGridDB API Key",
+         "service", KEYRING_SERVICE, "username", KEYRING_USERNAME],
+        input=key, text=True, check=True
+    )
+    info("API key stored in system keyring.")
+    return key
+
+
+def sgdb_request(endpoint: str, api_key: str) -> dict:
+    """Make a SteamGridDB API request."""
+    result = http_get_json(
+        f"{SGDB_API}/{endpoint}",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+            "User-Agent": "game-steam/1.0",
+        }
+    )
+    if result is None:
+        return {"data": []}
+    return result
+
+
+def sgdb_search_game(name: str, api_key: str) -> Optional[dict]:
+    """Search SteamGridDB for a game by name."""
+    encoded = urllib.parse.quote(name)
+    result = sgdb_request(f"search/autocomplete/{encoded}", api_key)
+    games = result.get("data", [])
+    if not games:
+        return None
+
+    if len(games) == 1:
+        return games[0]
+
+    # Auto-select exact name match
+    for game in games:
+        if game.get("name", "").lower() == name.lower():
+            info(f"SteamGridDB: exact match '{game['name']}'")
+            return game
+
+    print(f"\nSteamGridDB results for '{name}':")
+    for i, game in enumerate(games[:10], 1):
+        released = game.get("release_date", "")
+        types = ", ".join(game.get("types", []))
+        print(f"  {i:2d}) {game['name']}"
+              + (f" ({released})" if released else "")
+              + (f" [{types}]" if types else ""))
+    print(f"   0) Skip artwork")
+
+    choice = input(f"Select [0-{min(len(games), 10)}]: ").strip()
+    if choice == "0":
+        return None
+    idx = int(choice) - 1
+    if 0 <= idx < len(games):
+        return games[idx]
+    return None
+
+
+def fetch_and_place_artwork(game_name: str, appid: int, grid_dir: Path, api_key: str):
+    """Search SteamGridDB for a game and download all artwork types."""
+    game = sgdb_search_game(game_name, api_key)
+    if not game:
+        print("  Skipping artwork.")
+        return
+
+    game_id = game["id"]
+    grid_dir.mkdir(parents=True, exist_ok=True)
+
+    art_types = {
+        "grids_portrait": {
+            "endpoint": "grids",
+            "suffix": "p",
+            "params": "?dimensions=600x900",
+            "desc": "Portrait grid",
+        },
+        "grids_landscape": {
+            "endpoint": "grids",
+            "suffix": "",
+            "params": "?dimensions=460x215,920x430",
+            "desc": "Landscape grid",
+        },
+        "heroes": {
+            "endpoint": "heroes",
+            "suffix": "_hero",
+            "params": "",
+            "desc": "Hero banner",
+        },
+        "logos": {
+            "endpoint": "logos",
+            "suffix": "_logo",
+            "params": "",
+            "desc": "Logo",
+        },
+        "icons": {
+            "endpoint": "icons",
+            "suffix": "_icon",
+            "params": "",
+            "desc": "Icon",
+        },
+    }
+
+    for art_info in art_types.values():
+        endpoint = art_info["endpoint"]
+        params = art_info.get("params", "")
+        result = sgdb_request(f"{endpoint}/game/{game_id}{params}", api_key)
+        images = result.get("data", [])
+
+        if not images:
+            print(f"  {art_info['desc']}: not found")
+            continue
+
+        # Pick the highest-scored static image
+        best = None
+        for img in images:
+            if img.get("type") == "animated":
+                continue
+            if best is None or img.get("score", 0) > best.get("score", 0):
+                best = img
+        if best is None:
+            best = images[0]
+
+        url = best.get("url", best.get("thumb", ""))
+        if not url:
+            continue
+
+        ext = ".png"
+        if ".jpg" in url or ".jpeg" in url:
+            ext = ".jpg"
+        elif ".webp" in url:
+            ext = ".webp"
+
+        dest = grid_dir / f"{appid}{art_info['suffix']}{ext}"
+        if download_file(url, dest):
+            print(f"  {art_info['desc']}: {dest.name}")
+        else:
+            print(f"  {art_info['desc']}: download failed")
+
+
+# --- Commands ---
+
+def cmd_add(args):
+    """Add a non-Steam game to Steam library."""
+    user_id = args.user_id or find_steam_user_id()
+    shortcuts_path = STEAM_DIR / "userdata" / user_id / "config" / "shortcuts.vdf"
+    grid_dir = STEAM_DIR / "userdata" / user_id / "config" / "grid"
+
+    exe_path = args.exe
+
+    # Step 1: Infer game name from exe if not provided
+    inferred_name = infer_game_name(exe_path)
+    name = args.name or inferred_name
+
+    # Step 2: Search Steam Store for game info (tags, genres, official name)
+    steam_appid = None
+    steam_details = None
+    tags = []
+
+    if not args.no_lookup:
+        search_term = args.search or name
+        info(f"Searching Steam for '{search_term}'...")
+        steam_match = steam_search(search_term)
+
+        if steam_match:
+            steam_appid = steam_match["id"]
+            # Use official name unless user explicitly set --name
+            if not args.name:
+                name = steam_match["name"]
+            info(f"Found: {steam_match['name']} (AppID: {steam_appid})")
+
+            # Get detailed info
+            info("Fetching game details...")
+            steam_details = steam_get_details(steam_appid)
+            if steam_details:
+                tags = extract_tags_from_steam(steam_details)
+                if tags:
+                    info(f"Tags: {', '.join(tags)}")
+                desc = steam_details.get("short_description", "")
+                if desc:
+                    # Truncate for display
+                    if len(desc) > 120:
+                        desc = desc[:117] + "..."
+                    print(f"  {desc}")
+        else:
+            warn(f"Not found on Steam. Using name: '{name}'")
+
+    # Allow manual tag override/addition
+    if args.tags:
+        extra = [t.strip() for t in args.tags.split(",")]
+        tags = list(dict.fromkeys(tags + extra))  # merge + dedupe
+
+    # Step 3: Build launch command
+    if args.prefix:
+        exe = shutil.which("proton-run") or str(Path.home() / ".local/bin/proton-run")
+        launch_parts = []
+        if args.mangohud:
+            launch_parts.append("--mangohud")
+        if args.lsfg:
+            launch_parts.append("--lsfg")
+        if args.gamescope:
+            launch_parts.append("--gamescope")
+        launch_parts.append(args.prefix)
+
+        game_exe = exe_path
+        if " " in game_exe:
+            game_exe = f'"{game_exe}"'
+        launch_parts.append(game_exe)
+
+        if args.args:
+            launch_parts.append(args.args)
+
+        launch_options = " ".join(launch_parts)
+        start_dir = str(Path(exe_path).parent)
+    elif args.native:
+        exe = exe_path
+        launch_options = args.args or ""
+        start_dir = str(Path(exe_path).parent)
+    else:
+        # Auto-detect: if a prefix is not given, check if exe is inside a game-prefix
+        prefix_match = None
+        try:
+            exe_resolved = Path(exe_path).resolve()
+            for pdir in PREFIXES_DIR.iterdir():
+                if pdir.is_dir() and str(exe_resolved).startswith(str(pdir)):
+                    prefix_match = pdir.name
+                    break
+        except Exception:
+            pass
+
+        if prefix_match:
+            info(f"Auto-detected prefix: {prefix_match}")
+            exe = shutil.which("proton-run") or str(Path.home() / ".local/bin/proton-run")
+            game_exe = exe_path
+            if " " in game_exe:
+                game_exe = f'"{game_exe}"'
+            launch_options = f"{prefix_match} {game_exe}"
+            if args.args:
+                launch_options += f" {args.args}"
+            start_dir = str(Path(exe_path).parent)
+        else:
+            print("Error: --prefix or --native required (or exe must be inside a game-prefix)", file=sys.stderr)
+            sys.exit(1)
+
+    # Step 4: Check if already exists
+    shortcuts = load_shortcuts(shortcuts_path)
+    existing_key = find_shortcut_by_name(shortcuts, name)
+    if existing_key and not args.force:
+        print(f"'{name}' already exists in Steam. Use --force to overwrite.")
+        sys.exit(1)
+    elif existing_key:
+        entry_key = existing_key
+        info(f"Overwriting existing entry for '{name}'.")
+    else:
+        entry_key = next_shortcut_id(shortcuts)
+
+    # Calculate deterministic AppID
+    appid_signed, appid_unsigned = generate_shortcut_id(exe, name)
+
+    # Step 5: Build shortcut entry
+    entry = {
+        "appid": appid_signed,
+        "AppName": name,
+        "Exe": f'"{exe}"',
+        "StartDir": f'"{start_dir}"',
+        "icon": args.icon or "",
+        "ShortcutPath": "",
+        "LaunchOptions": launch_options,
+        "IsHidden": 0,
+        "AllowDesktopConfig": 1,
+        "AllowOverlay": 1,
+        "OpenVR": 0,
+        "Devkit": 0,
+        "DevkitGameID": "",
+        "DevkitOverrideAppID": 0,
+        "LastPlayTime": 0,
+        "FlatpakAppID": "",
+        "tags": {str(i): tag for i, tag in enumerate(tags)},
+    }
+
+    if "shortcuts" not in shortcuts:
+        shortcuts["shortcuts"] = {}
+    shortcuts["shortcuts"][entry_key] = entry
+
+    save_shortcuts(shortcuts_path, shortcuts)
+
+    print()
+    info(f"Added '{name}' to Steam (AppID: {appid_unsigned})")
+    print(f"  Exe:    {exe}")
+    print(f"  Launch: {launch_options}")
+    if tags:
+        print(f"  Tags:   {', '.join(tags)}")
+
+    # Step 6: Fetch artwork from SteamGridDB
+    if not args.no_art:
+        print()
+        info("Fetching artwork from SteamGridDB...")
+        try:
+            api_key = get_api_key()
+            search_name = args.art_search or name
+            fetch_and_place_artwork(search_name, appid_unsigned, grid_dir, api_key)
+        except (ValueError, KeyboardInterrupt) as e:
+            print(f"  Artwork skipped: {e}")
+
+    print()
+    info("Restart Steam for the game to appear in your library.")
+
+
+def cmd_remove(args):
+    """Remove a non-Steam game from Steam library."""
+    user_id = args.user_id or find_steam_user_id()
+    shortcuts_path = STEAM_DIR / "userdata" / user_id / "config" / "shortcuts.vdf"
+    grid_dir = STEAM_DIR / "userdata" / user_id / "config" / "grid"
+
+    shortcuts = load_shortcuts(shortcuts_path)
+    key = find_shortcut_by_name(shortcuts, args.name)
+    if not key:
+        print(f"'{args.name}' not found in Steam shortcuts.")
+        sys.exit(1)
+
+    entry = shortcuts["shortcuts"][key]
+    exe = entry.get("Exe", entry.get("exe", "")).strip('"')
+    name = entry.get("AppName", entry.get("appname", ""))
+    _, appid_unsigned = generate_shortcut_id(exe, name)
+
+    del shortcuts["shortcuts"][key]
+    save_shortcuts(shortcuts_path, shortcuts)
+    info(f"Removed '{name}' from Steam shortcuts.")
+
+    # Clean up artwork
+    for pattern in [f"{appid_unsigned}.*", f"{appid_unsigned}_*", f"{appid_unsigned}p.*"]:
+        for f in grid_dir.glob(pattern):
+            f.unlink()
+            print(f"  Removed artwork: {f.name}")
+
+    info("Restart Steam to apply changes.")
+
+
+def cmd_list(args):
+    """List non-Steam game shortcuts."""
+    user_id = args.user_id or find_steam_user_id()
+    shortcuts_path = STEAM_DIR / "userdata" / user_id / "config" / "shortcuts.vdf"
+
+    shortcuts = load_shortcuts(shortcuts_path)
+    entries = shortcuts.get("shortcuts", {})
+
+    if not entries:
+        print("No non-Steam shortcuts found.")
+        return
+
+    print(f"{'NAME':<30} {'EXE':<50} {'LAUNCH OPTIONS'}")
+    print(f"{'----':<30} {'---':<50} {'--------------'}")
+    for _key, entry in sorted(entries.items(), key=lambda x: int(x[0])):
+        name = entry.get("AppName", entry.get("appname", "?"))
+        exe = entry.get("Exe", entry.get("exe", "?")).strip('"')
+        opts = entry.get("LaunchOptions", entry.get("launchoptions", ""))
+        if len(exe) > 48:
+            exe = "..." + exe[-45:]
+        if len(opts) > 60:
+            opts = opts[:57] + "..."
+        print(f"{name:<30} {exe:<50} {opts}")
+
+
+def cmd_art(args):
+    """Fetch/replace artwork for an existing Steam shortcut."""
+    user_id = args.user_id or find_steam_user_id()
+    shortcuts_path = STEAM_DIR / "userdata" / user_id / "config" / "shortcuts.vdf"
+    grid_dir = STEAM_DIR / "userdata" / user_id / "config" / "grid"
+
+    shortcuts = load_shortcuts(shortcuts_path)
+    key = find_shortcut_by_name(shortcuts, args.name)
+    if not key:
+        print(f"'{args.name}' not found in Steam shortcuts.")
+        sys.exit(1)
+
+    entry = shortcuts["shortcuts"][key]
+    exe = entry.get("Exe", entry.get("exe", "")).strip('"')
+    name = entry.get("AppName", entry.get("appname", ""))
+    _, appid_unsigned = generate_shortcut_id(exe, name)
+
+    info(f"Fetching artwork for '{name}' (AppID: {appid_unsigned})...")
+    api_key = get_api_key()
+    search_name = args.search or name
+    fetch_and_place_artwork(search_name, appid_unsigned, grid_dir, api_key)
+    info("Restart Steam to see updated artwork.")
+
+
+# --- Main ---
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Add non-Steam games to Steam with auto-detected tags and artwork.",
+        epilog="Example: game-steam add --prefix brotato /path/to/Brotato.exe"
+    )
+    parser.add_argument("--user-id", help="Steam user ID (auto-detected)")
+    parser.add_argument("-v", "--verbose", action="store_true")
+    sub = parser.add_subparsers(dest="command")
+
+    # add
+    p_add = sub.add_parser("add", help="Add a game to Steam",
+        description="Add a non-Steam game. Auto-detects name, tags, and artwork.")
+    p_add.add_argument("exe", help="Path to game executable")
+    p_add.add_argument("--prefix", help="game-prefix name (uses proton-run)")
+    p_add.add_argument("--native", action="store_true", help="Native Linux game")
+    p_add.add_argument("--name", help="Override display name (default: auto-detected)")
+    p_add.add_argument("--search", help="Custom Steam search term")
+    p_add.add_argument("--tags", help="Extra comma-separated tags to add")
+    p_add.add_argument("--icon", help="Path to icon file")
+    p_add.add_argument("--args", help="Extra launch arguments")
+    p_add.add_argument("--mangohud", action="store_true")
+    p_add.add_argument("--lsfg", action="store_true")
+    p_add.add_argument("--gamescope", action="store_true")
+    p_add.add_argument("--no-art", action="store_true", help="Skip SteamGridDB artwork")
+    p_add.add_argument("--no-lookup", action="store_true", help="Skip Steam Store lookup")
+    p_add.add_argument("--art-search", help="Custom SteamGridDB search term")
+    p_add.add_argument("--force", action="store_true", help="Overwrite existing entry")
+
+    # remove
+    p_rm = sub.add_parser("remove", aliases=["rm"], help="Remove from Steam")
+    p_rm.add_argument("name", help="Game name to remove")
+
+    # list
+    sub.add_parser("list", aliases=["ls"], help="List non-Steam shortcuts")
+
+    # art
+    p_art = sub.add_parser("art", help="Fetch/replace artwork")
+    p_art.add_argument("name", help="Game name")
+    p_art.add_argument("--search", help="Custom SteamGridDB search term")
+
+    args = parser.parse_args()
+    if args.verbose:
+        logging.basicConfig(level=logging.DEBUG)
+
+    if not args.command:
+        parser.print_help()
+        sys.exit(0)
+
+    cmd_map = {
+        "add": cmd_add,
+        "remove": cmd_remove,
+        "rm": cmd_remove,
+        "list": cmd_list,
+        "ls": cmd_list,
+        "art": cmd_art,
+    }
+    cmd_map[args.command](args)
+
+
+if __name__ == "__main__":
+    main()

@@ -17,12 +17,13 @@ screenshot-path "~/Pictures/Screenshots/Screenshot from %Y-%m-%d %H-%M-%S.png"
 // Run `niri msg outputs` inside a niri session to see connector names and modes.
 // Then edit and uncomment this block to pin a specific monitor layout.
 
-// -output "eDP-1" {
-    // mode "1920x1080@60"
-    // scale 1
-    // transform "normal"
-    // position x=0 y=0
-// }
+output "DP-2" {
+    mode "2560x1440@144.000"
+    scale 1
+    transform "normal"
+    position x=0 y=0
+    variable-refresh-rate
+}
 
 // ============================================================================
 // INPUT
@@ -260,6 +261,7 @@ binds {
     Mod+V hotkey-overlay-title="ii Clipboard" { spawn "qs" "-c" "ii" "ipc" "call" "clipboard" "toggle"; }
 
     // Lock Screen
+    Mod+Alt+E hotkey-overlay-title="Widget Edit Mode" { spawn "qs" "-c" "ii" "ipc" "call" "widgets" "editMode"; }
     Mod+Alt+L allow-when-locked=true hotkey-overlay-title="Lock Screen" { spawn "qs" "-c" "ii" "ipc" "call" "lock" "activate"; }
 
     // Region Tools
@@ -269,6 +271,9 @@ binds {
 
     // Wallpaper Selector
     Ctrl+Alt+T hotkey-overlay-title="Wallpaper Selector" { spawn "qs" "-c" "ii" "ipc" "call" "wallpaperSelector" "toggle"; }
+
+    // Wallpaper Engine — random animated wallpaper + theming
+    Ctrl+Alt+W hotkey-overlay-title="Random WE Wallpaper" { spawn "we-wall"; }
 
     // Settings
     Mod+Comma hotkey-overlay-title="ii Settings" { spawn "qs" "-c" "ii" "ipc" "call" "settings" "open"; }
@@ -382,6 +387,8 @@ binds {
 
     Mod+Home  { focus-column-first; }
     Mod+End   { focus-column-last; }
+    Mod+Ctrl+H { focus-column-first; }
+    Mod+Ctrl+L { focus-column-last; }
 
     // ====================================================================
     // MOVE WINDOWS
@@ -398,6 +405,8 @@ binds {
 
     Mod+Ctrl+Home   { move-column-to-first; }
     Mod+Ctrl+End    { move-column-to-last; }
+    Mod+Ctrl+Shift+H { move-column-to-first; }
+    Mod+Ctrl+Shift+L { move-column-to-last; }
 
     // ====================================================================
     // WORKSPACES — Index
@@ -424,19 +433,19 @@ binds {
     Mod+Ctrl+9 { move-column-to-workspace 9; }
 
     // ====================================================================
-    // WORKSPACES — Sequential Navigation
+    // WORKSPACES — Sequential Navigation (home row: Semicolon axis)
     // ====================================================================
 
     Mod+Ctrl+Down      { focus-workspace-down; }
     Mod+Ctrl+Up        { focus-workspace-up; }
-    Mod+U              { focus-workspace-down; }
-    Mod+I              { focus-workspace-up; }
+    Mod+Semicolon              { focus-workspace-down; }
+    Mod+Shift+Semicolon        { focus-workspace-up; }
 
-    Mod+Ctrl+U         { move-column-to-workspace-down; }
-    Mod+Ctrl+I         { move-column-to-workspace-up; }
+    Mod+Ctrl+Semicolon         { move-column-to-workspace-down; }
+    Mod+Ctrl+Shift+Semicolon   { move-column-to-workspace-up; }
 
-    Mod+Shift+U        { move-workspace-down; }
-    Mod+Shift+I        { move-workspace-up; }
+    Mod+Alt+Semicolon          { move-workspace-down; }
+    Mod+Alt+Shift+Semicolon    { move-workspace-up; }
 
     // ====================================================================
     // MOUSE WHEEL — Workspace & Column Scroll
@@ -496,4 +505,14 @@ layer-rule {
     match namespace="quickshell:wBackdrop"
     place-within-backdrop true
     opacity 1.0
+}
+
+layer-rule {
+    match namespace="linux-wallpaperengine"
+    place-within-backdrop true
+}
+
+layer-rule {
+    match namespace="quickshell:background"
+    place-within-backdrop true
 }

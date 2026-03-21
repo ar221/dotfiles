@@ -1,0 +1,865 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# game-prefix — Create and manage Wine/Proton prefixes for games
+# Prefixes stored in ~/.local/share/game-prefixes/<name>/
+
+readonly PREFIXES_DIR="${HOME}/.local/share/game-prefixes"
+readonly COMPAT_DIRS=(
+    "${HOME}/.local/share/Steam/compatibilitytools.d"
+    "/usr/share/steam/compatibilitytools.d"
+)
+readonly DEFAULT_PROTON="proton-cachyos"
+readonly WINE_CACHYOS="/opt/wine-cachyos/bin/wine"
+
+# --- Helpers ---
+
+info()  { printf '\033[1;34m::\033[0m %s\n' "$*"; }
+warn()  { printf '\033[1;33m::\033[0m %s\n' "$*" >&2; }
+error() { printf '\033[1;31m::\033[0m %s\n' "$*" >&2; }
+die()   { error "$@"; exit 1; }
+
+usage() {
+    cat <<'EOF'
+Usage: game-prefix <command> [options]
+
+Commands:
+  create <name> [options]     Create a new prefix
+    --proton <version>        Proton version (default: proton-cachyos)
+    --wine-cachyos            Use Wine CachyOS instead of Proton
+    --arch <win32|win64>      Architecture (default: win64)
+    --path <dir>              Custom prefix location (symlinked into prefixes dir)
+    --no-init                 Skip initial prefix creation (lazy init)
+
+  list                        List all prefixes
+  info <name>                 Show prefix details
+  delete <name>               Delete a prefix (with confirmation)
+  tricks <name> <verb|bundle>  Run winetricks verbs or bundles on a prefix
+    Bundles: essentials, audio, fonts, codecs, dx, runtime, full
+    Use 'tricks <name> bundles' to list all bundles
+  env <name> [KEY=VAL...]     Get/set environment variables for a prefix
+    --preset <name>           Apply preset: recommended, performance, debug, clean
+    Use 'env <name> presets' to list all presets
+  gamescope <name> [options]  Configure per-game gamescope settings
+    --width <W>               Game render width (-w)
+    --height <H>              Game render height (-h)
+    --output-width <W>        Output width (-W)
+    --output-height <H>       Output height (-H)
+    --fullscreen              Run fullscreen (-f)
+    --borderless              Run borderless (-b)
+    --refresh <rate>          Refresh rate (-r)
+    --fps-limit <n>           Framerate limit (--framerate-limit)
+    --scaler <type>           Upscaler: auto|integer|fit|fill|stretch (-S)
+    --filter <type>           Filter: linear|nearest|fsr|nis|pixel (-F)
+    --sharpness <0-20>        FSR/NIS sharpness (0=max, 20=min)
+    --hdr                     Enable HDR output
+    --adaptive-sync           Enable VRR/FreeSync
+    --mangoapp                Use mangoapp overlay (instead of mangohud)
+    --extra "<flags>"         Any additional raw gamescope flags
+    --show                    Show current config (default if no options)
+    --clear                   Remove gamescope config
+  run <name> <command...>     Run a command inside the prefix's Wine env
+  winecfg <name>              Open Wine configuration for a prefix
+  protons                     List available Proton versions
+
+Prefixes: ~/.local/share/game-prefixes/
+EOF
+    exit "${1:-0}"
+}
+
+require_name() {
+    [[ -n "${1:-}" ]] || die "prefix name required"
+    echo "$1"
+}
+
+prefix_dir() {
+    echo "${PREFIXES_DIR}/$1"
+}
+
+prefix_exists() {
+    [[ -d "$(prefix_dir "$1")" ]]
+}
+
+require_prefix() {
+    local name
+    name="$(require_name "${1:-}")"
+    prefix_exists "$name" || die "prefix '$name' does not exist"
+    echo "$name"
+}
+
+find_proton() {
+    local version="$1"
+    local dir
+    for dir in "${COMPAT_DIRS[@]}"; do
+        if [[ -d "${dir}/${version}" ]]; then
+            echo "${dir}/${version}"
+            return
+        fi
+    done
+    die "Proton version '$version' not found in: ${COMPAT_DIRS[*]}"
+}
+
+load_prefix_config() {
+    local pdir="$1"
+    local config="${pdir}/config.env"
+    if [[ -f "$config" ]]; then
+        # shellcheck disable=SC1090
+        source "$config"
+    fi
+}
+
+# --- Commands ---
+
+cmd_create() {
+    local name="" proton="$DEFAULT_PROTON" arch="win64" init=true use_wine_cachyos=false
+    local custom_path=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --proton) proton="$2"; shift 2 ;;
+            --wine-cachyos) use_wine_cachyos=true; shift ;;
+            --arch)   arch="$2"; shift 2 ;;
+            --no-init) init=false; shift ;;
+            --path)   custom_path="$2"; shift 2 ;;
+            -*)       die "unknown option: $1" ;;
+            *)
+                [[ -z "$name" ]] && name="$1" || die "unexpected argument: $1"
+                shift ;;
+        esac
+    done
+
+    [[ -n "$name" ]] || die "prefix name required"
+    [[ "$arch" == "win32" || "$arch" == "win64" ]] || die "arch must be win32 or win64"
+
+    local pdir
+    local link_path="${PREFIXES_DIR}/${name}"
+    [[ ! -d "$link_path" && ! -L "$link_path" ]] || die "prefix '$name' already exists"
+
+    if [[ -n "$custom_path" ]]; then
+        # Custom path: create there, symlink from prefixes dir
+        pdir="$(realpath -m "$custom_path")"
+        [[ ! -d "$pdir" ]] || die "directory already exists: ${pdir}"
+        mkdir -p "$pdir"
+        ln -s "$pdir" "$link_path"
+        info "Custom path: ${pdir} → ${link_path}"
+    else
+        pdir="$link_path"
+    fi
+
+    if $use_wine_cachyos; then
+        [[ -x "$WINE_CACHYOS" ]] || die "wine-cachyos-opt not installed (paru -S wine-cachyos-opt)"
+    else
+        # Validate proton exists
+        find_proton "$proton" >/dev/null
+    fi
+
+    mkdir -p "${pdir}/pfx"
+
+    # Write prefix metadata
+    if $use_wine_cachyos; then
+        cat > "${pdir}/prefix.conf" <<CONF
+# game-prefix config for: ${name}
+# Created: $(date -Iseconds)
+WINE_BACKEND=wine-cachyos
+WINEARCH=${arch}
+CONF
+    else
+        cat > "${pdir}/prefix.conf" <<CONF
+# game-prefix config for: ${name}
+# Created: $(date -Iseconds)
+PROTON_VERSION=${proton}
+WINEARCH=${arch}
+CONF
+    fi
+
+    # Write default env config with CachyOS-recommended flags
+    cat > "${pdir}/config.env" <<ENV
+# Per-game environment variables for: ${name}
+# These are sourced before launching the game.
+#
+# --- Performance ---
+#   MANGOHUD=1
+#   DXVK_HUD=fps,frametime
+#   ENABLE_GAMESCOPE=0
+#   GAMESCOPE_ARGS="-w 2560 -h 1440 -f"
+#
+# --- CachyOS Proton flags ---
+#   PROTON_ENABLE_WAYLAND=1          # Native Wayland (breaks Steam Overlay)
+#   PROTON_ENABLE_HDR=1              # HDR (needs gamescope or Wayland)
+#   PROTON_USE_NTSYNC=1              # In-process sync (on by default)
+#   PROTON_FSR4_UPGRADE=1            # Auto-upgrade AMD FSR 4
+#   PROTON_LOCAL_SHADER_CACHE=1      # Per-game shader isolation
+#   ENABLE_LAYER_MESA_ANTI_LAG=1     # AMD Anti-Lag
+#   PROTON_PREFER_SDL=1              # Better controller detection
+#   PROTON_USE_WINED3D=1             # OpenGL fallback for old games
+#
+# --- Wine CachyOS flags ---
+#   WINE_NO_WM_DECORATION=1          # Fixes borderless fullscreen
+#   WINE_PREFER_SDL_INPUT=1          # Controller workaround
+#   WINEUSERSANDBOX=1                # Disable home folder symlinks
+#
+# --- Upscaling ---
+#   WINE_FULLSCREEN_FSR=1            # AMD FSR upscaling
+#   WINE_FULLSCREEN_FSR_STRENGTH=2   # FSR sharpness (0-5, lower=sharper)
+#
+# --- lsfg-vk (frame generation) ---
+#   ENABLE_LSFG=1                    # Enable lsfg-vk frame gen
+ENV
+
+    if $init; then
+        if $use_wine_cachyos; then
+            info "Initializing prefix '$name' (${arch}) with Wine CachyOS..."
+            export WINEPREFIX="${pdir}/pfx"
+            export WINEARCH="$arch"
+            "$WINE_CACHYOS" wineboot --init 2>/dev/null || true
+        else
+            info "Initializing prefix '$name' (${arch}) with ${proton}..."
+            local proton_dir
+            proton_dir="$(find_proton "$proton")"
+            export STEAM_COMPAT_DATA_PATH="${pdir}"
+            export STEAM_COMPAT_CLIENT_INSTALL_PATH="${HOME}/.local/share/Steam"
+            export WINEPREFIX="${pdir}/pfx"
+            export WINEARCH="$arch"
+            "${proton_dir}/proton" run wineboot --init 2>/dev/null || true
+        fi
+        info "Prefix initialized"
+    else
+        info "Prefix '$name' created (will initialize on first run)"
+    fi
+
+    info "Location: ${pdir}"
+    info "Config:   ${pdir}/config.env"
+}
+
+cmd_list() {
+    if [[ ! -d "$PREFIXES_DIR" ]] || [[ -z "$(ls -A "$PREFIXES_DIR" 2>/dev/null)" ]]; then
+        info "No prefixes found"
+        return
+    fi
+
+    printf '%-20s %-18s %-8s %s\n' "NAME" "PROTON" "ARCH" "SIZE"
+    printf '%-20s %-18s %-8s %s\n' "----" "------" "----" "----"
+
+    for pdir in "${PREFIXES_DIR}"/*/; do
+        [[ -d "$pdir" ]] || continue
+        local name
+        name="$(basename "$pdir")"
+        local proton="unknown" arch="unknown"
+
+        if [[ -f "${pdir}/prefix.conf" ]]; then
+            # shellcheck disable=SC1090
+            source "${pdir}/prefix.conf"
+            if [[ "${WINE_BACKEND:-}" == "wine-cachyos" ]]; then
+                proton="wine-cachyos"
+            else
+                proton="${PROTON_VERSION:-unknown}"
+            fi
+            arch="${WINEARCH:-unknown}"
+        fi
+
+        local size
+        size="$(du -sh "$pdir" 2>/dev/null | cut -f1)"
+        printf '%-20s %-18s %-8s %s\n' "$name" "$proton" "$arch" "$size"
+    done
+}
+
+cmd_info() {
+    local name
+    name="$(require_prefix "${1:-}")"
+    local pdir
+    pdir="$(prefix_dir "$name")"
+
+    local link_path="${PREFIXES_DIR}/${name}"
+    info "Prefix: $name"
+    if [[ -L "$link_path" ]]; then
+        echo "  Location: $(readlink -f "$link_path") (symlinked)"
+    else
+        echo "  Location: ${pdir}"
+    fi
+
+    if [[ -f "${pdir}/prefix.conf" ]]; then
+        # shellcheck disable=SC1090
+        source "${pdir}/prefix.conf"
+        if [[ "${WINE_BACKEND:-}" == "wine-cachyos" ]]; then
+            echo "  Backend:  Wine CachyOS (/opt/wine-cachyos/bin/wine)"
+        else
+            echo "  Proton:   ${PROTON_VERSION:-unknown}"
+        fi
+        echo "  Arch:     ${WINEARCH:-unknown}"
+    fi
+
+    local size
+    size="$(du -sh "$pdir" 2>/dev/null | cut -f1)"
+    echo "  Size:     ${size}"
+
+    if [[ -f "${pdir}/config.env" ]]; then
+        local env_vars
+        env_vars="$(grep -v '^\s*#' "${pdir}/config.env" | grep -v '^\s*$' || true)"
+        if [[ -n "$env_vars" ]]; then
+            echo "  Env vars:"
+            while IFS= read -r line; do
+                echo "    ${line}"
+            done <<< "$env_vars"
+        fi
+    fi
+
+    # Show installed winetricks
+    local tricks_log="${pdir}/pfx/winetricks.log"
+    if [[ -f "$tricks_log" ]]; then
+        echo "  Winetricks:"
+        while IFS= read -r line; do
+            echo "    ${line}"
+        done < "$tricks_log"
+    fi
+
+    # Show gamescope config
+    local gs_conf="${pdir}/gamescope.conf"
+    if [[ -f "$gs_conf" ]]; then
+        local gs_args
+        gs_args="$(build_gamescope_args "$gs_conf")"
+        echo "  Gamescope:  ${gs_args:-"(configured but empty)"}"
+    fi
+}
+
+cmd_delete() {
+    local name
+    name="$(require_prefix "${1:-}")"
+    local link_path="${PREFIXES_DIR}/${name}"
+    local pdir
+    pdir="$(prefix_dir "$name")"
+
+    local size
+    size="$(du -shL "$pdir" 2>/dev/null | cut -f1)"
+
+    if [[ -L "$link_path" ]]; then
+        local target
+        target="$(readlink -f "$link_path")"
+        warn "About to delete prefix '$name' (${size}) at ${target}"
+    else
+        warn "About to delete prefix '$name' (${size})"
+    fi
+
+    read -rp "Are you sure? [y/N] " confirm
+    [[ "$confirm" =~ ^[Yy]$ ]] || { info "Cancelled"; return; }
+
+    # If symlink, remove both the target and the link
+    if [[ -L "$link_path" ]]; then
+        local target
+        target="$(readlink -f "$link_path")"
+        rm -rf "$target"
+        rm -f "$link_path"
+        info "Removed ${target} and symlink"
+    else
+        rm -rf "$pdir"
+    fi
+    info "Prefix '$name' deleted"
+
+    # Also remove any associated .desktop files
+    local desktop_file="${HOME}/.local/share/applications/game-${name}.desktop"
+    if [[ -f "$desktop_file" ]]; then
+        rm -f "$desktop_file"
+        info "Removed desktop shortcut"
+    fi
+}
+
+## Winetricks bundles — curated dependency packs
+# Expand a bundle name into winetricks verbs
+expand_bundle() {
+    case "$1" in
+        essentials)  echo "vcrun2019 dotnet48 corefonts" ;;
+        audio)       echo "xact_x64 xaudio29 faudio" ;;
+        fonts)       echo "corefonts cjkfonts" ;;
+        codecs)      echo "allcodecs" ;;
+        dx)          echo "d3dx9 d3dx10 d3dx11_43 d3dcompiler_47" ;;
+        runtime)     echo "vcrun2019 vcrun2022 dotnet48 dotnet6" ;;
+        full)        echo "vcrun2019 vcrun2022 dotnet48 dotnet6 xact_x64 xaudio29 faudio corefonts cjkfonts allcodecs d3dx9 d3dx10 d3dx11_43 d3dcompiler_47" ;;
+        bundles)
+            info "Available bundles:"
+            echo "  essentials  — vcrun2019 dotnet48 corefonts (start here)"
+            echo "  audio       — xact_x64 xaudio29 faudio"
+            echo "  fonts       — corefonts cjkfonts"
+            echo "  codecs      — allcodecs (video codecs for cutscenes)"
+            echo "  dx          — d3dx9 d3dx10 d3dx11_43 d3dcompiler_47"
+            echo "  runtime     — vcrun2019 vcrun2022 dotnet48 dotnet6"
+            echo "  full        — everything above combined"
+            return 1 ;;  # signal: don't install, just listed
+        *)  return 2 ;;  # not a bundle
+    esac
+}
+
+cmd_tricks() {
+    # Allow "game-prefix tricks bundles" without a prefix name
+    if [[ "${1:-}" == "bundles" ]]; then
+        expand_bundle bundles
+        return
+    fi
+
+    local name
+    name="$(require_prefix "${1:-}")"
+    shift
+
+    [[ $# -gt 0 ]] || die "at least one winetricks verb or bundle name required (try: game-prefix tricks bundles)"
+
+    # Check for special "bundles" listing command
+    if [[ "$1" == "bundles" ]]; then
+        expand_bundle bundles
+        return
+    fi
+
+    local pdir
+    pdir="$(prefix_dir "$name")"
+
+    # Load prefix config
+    local PROTON_VERSION WINEARCH WINE_BACKEND
+    if [[ -f "${pdir}/prefix.conf" ]]; then
+        # shellcheck disable=SC1090
+        source "${pdir}/prefix.conf"
+    fi
+
+    export WINEPREFIX="${pdir}/pfx"
+    export WINEARCH="${WINEARCH:-win64}"
+
+    if [[ "${WINE_BACKEND:-}" == "wine-cachyos" ]]; then
+        # Wine CachyOS prefix
+        export WINE="$WINE_CACHYOS"
+        export WINESERVER="/opt/wine-cachyos/bin/wineserver"
+    elif [[ -n "${PROTON_VERSION:-}" ]]; then
+        # Proton prefix — use Proton's bundled Wine
+        local proton_dir
+        proton_dir="$(find_proton "$PROTON_VERSION")"
+        local proton_wine="${proton_dir}/files/bin/wine64"
+        [[ -x "$proton_wine" ]] || proton_wine="${proton_dir}/files/bin/wine"
+        if [[ -x "$proton_wine" ]]; then
+            export WINE="$proton_wine"
+            export WINESERVER="${proton_dir}/files/bin/wineserver"
+        fi
+    fi
+
+    # Expand bundles into verbs, pass through regular verbs
+    local verbs=()
+    for arg in "$@"; do
+        local expanded
+        expanded="$(expand_bundle "$arg" 2>/dev/null)" && {
+            info "Bundle '$arg' → ${expanded}"
+            # shellcheck disable=SC2206
+            verbs+=($expanded)
+            continue
+        }
+        verbs+=("$arg")
+    done
+
+    # Deduplicate
+    local unique_verbs
+    unique_verbs="$(printf '%s\n' "${verbs[@]}" | sort -u | tr '\n' ' ')"
+
+    info "Running winetricks on '$name': ${unique_verbs}"
+    # shellcheck disable=SC2086
+    winetricks $unique_verbs
+}
+
+cmd_gamescope() {
+    local name
+    name="$(require_prefix "${1:-}")"
+    shift || true
+
+    local pdir
+    pdir="$(prefix_dir "$name")"
+    local gs_conf="${pdir}/gamescope.conf"
+
+    # Default: show current config
+    if [[ $# -eq 0 ]] || [[ "$1" == "--show" ]]; then
+        if [[ -f "$gs_conf" ]]; then
+            info "Gamescope config for '${name}':"
+            # shellcheck disable=SC1090
+            source "$gs_conf"
+            [[ -n "${GS_WIDTH:-}" ]]         && echo "  Game width:     ${GS_WIDTH}"
+            [[ -n "${GS_HEIGHT:-}" ]]        && echo "  Game height:    ${GS_HEIGHT}"
+            [[ -n "${GS_OUTPUT_WIDTH:-}" ]]  && echo "  Output width:   ${GS_OUTPUT_WIDTH}"
+            [[ -n "${GS_OUTPUT_HEIGHT:-}" ]] && echo "  Output height:  ${GS_OUTPUT_HEIGHT}"
+            [[ -n "${GS_FULLSCREEN:-}" ]]    && echo "  Fullscreen:     ${GS_FULLSCREEN}"
+            [[ -n "${GS_BORDERLESS:-}" ]]    && echo "  Borderless:     ${GS_BORDERLESS}"
+            [[ -n "${GS_REFRESH:-}" ]]       && echo "  Refresh rate:   ${GS_REFRESH}"
+            [[ -n "${GS_FPS_LIMIT:-}" ]]     && echo "  FPS limit:      ${GS_FPS_LIMIT}"
+            [[ -n "${GS_SCALER:-}" ]]        && echo "  Scaler:         ${GS_SCALER}"
+            [[ -n "${GS_FILTER:-}" ]]        && echo "  Filter:         ${GS_FILTER}"
+            [[ -n "${GS_SHARPNESS:-}" ]]     && echo "  Sharpness:      ${GS_SHARPNESS}"
+            [[ -n "${GS_HDR:-}" ]]           && echo "  HDR:            ${GS_HDR}"
+            [[ -n "${GS_ADAPTIVE_SYNC:-}" ]] && echo "  Adaptive sync:  ${GS_ADAPTIVE_SYNC}"
+            [[ -n "${GS_IMMEDIATE_FLIPS:-}" ]] && echo "  Immed. flips:   ${GS_IMMEDIATE_FLIPS}"
+            [[ -n "${GS_RT:-}" ]]            && echo "  RT scheduling:  ${GS_RT}"
+            [[ -n "${GS_GRAB:-}" ]]          && echo "  Keyboard grab:  ${GS_GRAB}"
+            [[ -n "${GS_FORCE_GRAB_CURSOR:-}" ]] && echo "  Force grab cursor: ${GS_FORCE_GRAB_CURSOR}"
+            [[ -n "${GS_MANGOAPP:-}" ]]      && echo "  MangoApp:       ${GS_MANGOAPP}"
+            [[ -n "${GS_EXTRA:-}" ]]         && echo "  Extra flags:    ${GS_EXTRA}"
+            echo ""
+            echo "  Resolved args:  $(build_gamescope_args "$gs_conf")"
+        else
+            info "No gamescope config for '${name}' (using defaults or CLI flags)"
+        fi
+        return
+    fi
+
+    if [[ "$1" == "--clear" ]]; then
+        rm -f "$gs_conf"
+        info "Gamescope config cleared for '${name}'"
+        return
+    fi
+
+    if [[ "$1" == "presets" ]]; then
+        info "Gamescope presets:"
+        echo "  recommended  — 1440p fullscreen, adaptive sync, immediate flips,"
+        echo "                 RT scheduling, force grab cursor, keyboard grab"
+        echo "  performance  — recommended + FSR upscaling (render 1080p → output 1440p)"
+        echo "  minimal      — fullscreen, adaptive sync only"
+        echo ""
+        echo "  Usage: game-prefix gamescope <name> --preset recommended"
+        return
+    fi
+
+    # Load existing config to preserve unmodified values
+    local GS_WIDTH="" GS_HEIGHT="" GS_OUTPUT_WIDTH="" GS_OUTPUT_HEIGHT=""
+    local GS_FULLSCREEN="" GS_BORDERLESS="" GS_REFRESH="" GS_FPS_LIMIT=""
+    local GS_SCALER="" GS_FILTER="" GS_SHARPNESS="" GS_HDR=""
+    local GS_ADAPTIVE_SYNC="" GS_MANGOAPP="" GS_EXTRA=""
+    local GS_RT="" GS_GRAB="" GS_FORCE_GRAB_CURSOR="" GS_IMMEDIATE_FLIPS=""
+    if [[ -f "$gs_conf" ]]; then
+        # shellcheck disable=SC1090
+        source "$gs_conf"
+    fi
+
+    # Parse options
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --preset)
+                case "$2" in
+                    recommended)
+                        GS_WIDTH="2560"; GS_HEIGHT="1440"
+                        GS_FULLSCREEN="1"; GS_ADAPTIVE_SYNC="1"
+                        GS_IMMEDIATE_FLIPS="1"; GS_RT="1"
+                        GS_FORCE_GRAB_CURSOR="1"; GS_GRAB="1"
+                        ;;
+                    performance)
+                        GS_WIDTH="1920"; GS_HEIGHT="1080"
+                        GS_OUTPUT_WIDTH="2560"; GS_OUTPUT_HEIGHT="1440"
+                        GS_FULLSCREEN="1"; GS_ADAPTIVE_SYNC="1"
+                        GS_IMMEDIATE_FLIPS="1"; GS_RT="1"
+                        GS_FORCE_GRAB_CURSOR="1"; GS_GRAB="1"
+                        GS_FILTER="fsr"; GS_SHARPNESS="3"
+                        ;;
+                    minimal)
+                        GS_FULLSCREEN="1"; GS_ADAPTIVE_SYNC="1"
+                        ;;
+                    *)  die "unknown preset: $2 (try: recommended, performance, minimal)" ;;
+                esac
+                shift 2 ;;
+            --width)         GS_WIDTH="$2"; shift 2 ;;
+            --height)        GS_HEIGHT="$2"; shift 2 ;;
+            --output-width)  GS_OUTPUT_WIDTH="$2"; shift 2 ;;
+            --output-height) GS_OUTPUT_HEIGHT="$2"; shift 2 ;;
+            --fullscreen)    GS_FULLSCREEN="1"; shift ;;
+            --borderless)    GS_BORDERLESS="1"; shift ;;
+            --refresh)       GS_REFRESH="$2"; shift 2 ;;
+            --fps-limit)     GS_FPS_LIMIT="$2"; shift 2 ;;
+            --scaler)        GS_SCALER="$2"; shift 2 ;;
+            --filter)        GS_FILTER="$2"; shift 2 ;;
+            --sharpness)     GS_SHARPNESS="$2"; shift 2 ;;
+            --hdr)           GS_HDR="1"; shift ;;
+            --adaptive-sync) GS_ADAPTIVE_SYNC="1"; shift ;;
+            --immediate-flips) GS_IMMEDIATE_FLIPS="1"; shift ;;
+            --rt)            GS_RT="1"; shift ;;
+            --grab)          GS_GRAB="1"; shift ;;
+            --force-grab-cursor) GS_FORCE_GRAB_CURSOR="1"; shift ;;
+            --mangoapp)      GS_MANGOAPP="1"; shift ;;
+            --extra)         GS_EXTRA="$2"; shift 2 ;;
+            --show)          shift ;;  # handled above
+            -*)              die "unknown gamescope option: $1" ;;
+            *)               die "unexpected argument: $1" ;;
+        esac
+    done
+
+    # Write config
+    cat > "$gs_conf" <<GSCONF
+# Gamescope config for: ${name}
+# Generated by game-prefix. Edit with: game-prefix gamescope ${name} --option value
+GS_WIDTH=${GS_WIDTH}
+GS_HEIGHT=${GS_HEIGHT}
+GS_OUTPUT_WIDTH=${GS_OUTPUT_WIDTH}
+GS_OUTPUT_HEIGHT=${GS_OUTPUT_HEIGHT}
+GS_FULLSCREEN=${GS_FULLSCREEN}
+GS_BORDERLESS=${GS_BORDERLESS}
+GS_REFRESH=${GS_REFRESH}
+GS_FPS_LIMIT=${GS_FPS_LIMIT}
+GS_SCALER=${GS_SCALER}
+GS_FILTER=${GS_FILTER}
+GS_SHARPNESS=${GS_SHARPNESS}
+GS_HDR=${GS_HDR}
+GS_ADAPTIVE_SYNC=${GS_ADAPTIVE_SYNC}
+GS_IMMEDIATE_FLIPS=${GS_IMMEDIATE_FLIPS}
+GS_RT=${GS_RT}
+GS_GRAB=${GS_GRAB}
+GS_FORCE_GRAB_CURSOR=${GS_FORCE_GRAB_CURSOR}
+GS_MANGOAPP=${GS_MANGOAPP}
+GS_EXTRA=${GS_EXTRA}
+GSCONF
+
+    info "Gamescope config saved for '${name}'"
+    info "Args: $(build_gamescope_args "$gs_conf")"
+    info "Enable with: proton-run --gamescope ${name} /path/to/game.exe"
+}
+
+# Build gamescope CLI args from a gamescope.conf file
+build_gamescope_args() {
+    local gs_conf="$1"
+    [[ -f "$gs_conf" ]] || { echo ""; return; }
+
+    local GS_WIDTH="" GS_HEIGHT="" GS_OUTPUT_WIDTH="" GS_OUTPUT_HEIGHT=""
+    local GS_FULLSCREEN="" GS_BORDERLESS="" GS_REFRESH="" GS_FPS_LIMIT=""
+    local GS_SCALER="" GS_FILTER="" GS_SHARPNESS="" GS_HDR=""
+    local GS_ADAPTIVE_SYNC="" GS_IMMEDIATE_FLIPS="" GS_RT="" GS_GRAB=""
+    local GS_FORCE_GRAB_CURSOR="" GS_MANGOAPP="" GS_EXTRA=""
+    # shellcheck disable=SC1090
+    source "$gs_conf"
+
+    local args=()
+    [[ -n "$GS_OUTPUT_WIDTH" ]]          && args+=(-W "$GS_OUTPUT_WIDTH")
+    [[ -n "$GS_OUTPUT_HEIGHT" ]]         && args+=(-H "$GS_OUTPUT_HEIGHT")
+    [[ -n "$GS_WIDTH" ]]                 && args+=(-w "$GS_WIDTH")
+    [[ -n "$GS_HEIGHT" ]]                && args+=(-h "$GS_HEIGHT")
+    [[ -n "$GS_REFRESH" ]]               && args+=(-r "$GS_REFRESH")
+    [[ "$GS_FULLSCREEN" == "1" ]]        && args+=(-f)
+    [[ "$GS_BORDERLESS" == "1" ]]        && args+=(-b)
+    [[ "$GS_GRAB" == "1" ]]             && args+=(-g)
+    [[ -n "$GS_FPS_LIMIT" ]]            && args+=(--framerate-limit "$GS_FPS_LIMIT")
+    [[ -n "$GS_SCALER" ]]               && args+=(-S "$GS_SCALER")
+    [[ -n "$GS_FILTER" ]]               && args+=(-F "$GS_FILTER")
+    [[ -n "$GS_SHARPNESS" ]]            && args+=(--sharpness "$GS_SHARPNESS")
+    [[ "$GS_HDR" == "1" ]]              && args+=(--hdr-enabled)
+    [[ "$GS_ADAPTIVE_SYNC" == "1" ]]    && args+=(--adaptive-sync)
+    [[ "$GS_IMMEDIATE_FLIPS" == "1" ]]  && args+=(--immediate-flips)
+    [[ "$GS_RT" == "1" ]]               && args+=(--rt)
+    [[ "$GS_FORCE_GRAB_CURSOR" == "1" ]] && args+=(--force-grab-cursor)
+    [[ "$GS_MANGOAPP" == "1" ]]         && args+=(--mangoapp)
+    # shellcheck disable=SC2206
+    [[ -n "$GS_EXTRA" ]]                && args+=($GS_EXTRA)
+
+    echo "${args[*]}"
+}
+
+## Env presets — curated env var sets
+expand_env_preset() {
+    case "$1" in
+        recommended)
+            echo "MANGOHUD=1 PROTON_USE_NTSYNC=1 PROTON_LOCAL_SHADER_CACHE=1 ENABLE_LAYER_MESA_ANTI_LAG=1"
+            ;;
+        performance)
+            echo "MANGOHUD=1 PROTON_USE_NTSYNC=1 PROTON_LOCAL_SHADER_CACHE=1 ENABLE_LAYER_MESA_ANTI_LAG=1 WINE_FULLSCREEN_FSR=1 WINE_FULLSCREEN_FSR_STRENGTH=2 DXVK_ASYNC=1 mesa_glthread=true"
+            ;;
+        debug)
+            echo "MANGOHUD=1 DXVK_HUD=fps,frametime,gpuload,devinfo PROTON_LOG=1 WINEDEBUG=+loaddll"
+            ;;
+        clean)
+            echo "MANGOHUD=0 DXVK_HUD= PROTON_LOG=0 WINEDEBUG="
+            ;;
+        presets)
+            info "Env presets:"
+            echo "  recommended  — MangoHud, NTSync, shader cache, AMD Anti-Lag"
+            echo "  performance  — recommended + FSR upscaling, DXVK async, mesa GL threading"
+            echo "  debug        — MangoHud, DXVK HUD (fps/frametime/gpu), Proton + Wine logging"
+            echo "  clean        — disable all overlays and logging"
+            echo ""
+            echo "  Usage: game-prefix env <name> --preset recommended"
+            echo "  Presets can be combined with extra vars:"
+            echo "    game-prefix env <name> --preset recommended WINE_FULLSCREEN_FSR=1"
+            return 1 ;;
+        *)  return 2 ;;
+    esac
+}
+
+cmd_env() {
+    local name
+    name="$(require_prefix "${1:-}")"
+    shift
+
+    local pdir
+    pdir="$(prefix_dir "$name")"
+    local config="${pdir}/config.env"
+
+    if [[ $# -eq 0 ]]; then
+        # Show current env
+        if [[ -f "$config" ]]; then
+            grep -v '^\s*#' "$config" | grep -v '^\s*$' || info "No env vars set"
+        else
+            info "No config.env found"
+        fi
+        return
+    fi
+
+    # Handle "presets" listing
+    if [[ "$1" == "presets" ]]; then
+        expand_env_preset presets
+        return
+    fi
+
+    # Collect all key=value pairs, expanding presets
+    local all_kvs=()
+    while [[ $# -gt 0 ]]; do
+        if [[ "$1" == "--preset" ]]; then
+            local preset_vars
+            preset_vars="$(expand_env_preset "$2" 2>/dev/null)" || die "unknown preset: $2 (try: game-prefix env <name> presets)"
+            info "Preset '$2' → ${preset_vars}"
+            # shellcheck disable=SC2206
+            all_kvs+=($preset_vars)
+            shift 2
+        else
+            all_kvs+=("$1")
+            shift
+        fi
+    done
+
+    # Set env vars
+    for kv in "${all_kvs[@]}"; do
+        [[ "$kv" == *=* ]] || die "invalid format: '$kv' (expected KEY=VALUE)"
+        local key="${kv%%=*}"
+        local val="${kv#*=}"
+
+        # Remove existing line for this key, then append
+        if [[ -f "$config" ]]; then
+            sed -i "/^${key}=/d" "$config"
+        fi
+        echo "${key}=${val}" >> "$config"
+        info "Set ${key}=${val}"
+    done
+}
+
+cmd_run() {
+    local name
+    name="$(require_prefix "${1:-}")"
+    shift
+
+    [[ $# -gt 0 ]] || die "command required"
+
+    local pdir
+    pdir="$(prefix_dir "$name")"
+
+    # Load prefix config
+    local PROTON_VERSION WINEARCH WINE_BACKEND
+    if [[ -f "${pdir}/prefix.conf" ]]; then
+        # shellcheck disable=SC1090
+        source "${pdir}/prefix.conf"
+    fi
+
+    export WINEPREFIX="${pdir}/pfx"
+    export WINEARCH="${WINEARCH:-win64}"
+    load_prefix_config "$pdir"
+
+    if [[ "${WINE_BACKEND:-}" == "wine-cachyos" ]]; then
+        export WINE="$WINE_CACHYOS"
+        export WINESERVER="/opt/wine-cachyos/bin/wineserver"
+        export PATH="/opt/wine-cachyos/bin:${PATH}"
+    elif [[ -n "${PROTON_VERSION:-}" ]]; then
+        local proton_dir
+        proton_dir="$(find_proton "$PROTON_VERSION")"
+        local proton_wine="${proton_dir}/files/bin/wine64"
+        [[ -x "$proton_wine" ]] || proton_wine="${proton_dir}/files/bin/wine"
+        if [[ -x "$proton_wine" ]]; then
+            export WINE="$proton_wine"
+            export WINESERVER="${proton_dir}/files/bin/wineserver"
+            export PATH="${proton_dir}/files/bin:${PATH}"
+        fi
+    fi
+
+    info "Running in prefix '$name': $*"
+    exec "$@"
+}
+
+cmd_winecfg() {
+    local name
+    name="$(require_prefix "${1:-}")"
+    local pdir
+    pdir="$(prefix_dir "$name")"
+
+    local PROTON_VERSION WINEARCH WINE_BACKEND
+    if [[ -f "${pdir}/prefix.conf" ]]; then
+        # shellcheck disable=SC1090
+        source "${pdir}/prefix.conf"
+    fi
+
+    export WINEPREFIX="${pdir}/pfx"
+    export WINEARCH="${WINEARCH:-win64}"
+
+    if [[ "${WINE_BACKEND:-}" == "wine-cachyos" ]]; then
+        export WINE="$WINE_CACHYOS"
+        export WINESERVER="/opt/wine-cachyos/bin/wineserver"
+        info "Opening winecfg for '${name}' (Wine CachyOS)..."
+        exec "$WINE_CACHYOS" winecfg
+    elif [[ -n "${PROTON_VERSION:-}" ]]; then
+        local proton_dir
+        proton_dir="$(find_proton "$PROTON_VERSION")"
+        local proton_wine="${proton_dir}/files/bin/wine64"
+        [[ -x "$proton_wine" ]] || proton_wine="${proton_dir}/files/bin/wine"
+        if [[ -x "$proton_wine" ]]; then
+            export WINE="$proton_wine"
+            export WINESERVER="${proton_dir}/files/bin/wineserver"
+            export PATH="${proton_dir}/files/bin:${PATH}"
+            info "Opening winecfg for '${name}' (${PROTON_VERSION})..."
+            exec "$proton_wine" winecfg
+        else
+            die "Wine binary not found in ${proton_dir}"
+        fi
+    else
+        info "Opening winecfg for '${name}' (system wine)..."
+        exec wine winecfg
+    fi
+}
+
+cmd_protons() {
+    local dir
+    for dir in "${COMPAT_DIRS[@]}"; do
+        if [[ -d "$dir" ]]; then
+            info "Proton versions in ${dir}:"
+            for d in "${dir}"/*/; do
+                [[ -d "$d" ]] || continue
+                local name
+                name="$(basename "$d")"
+                local marker=""
+                [[ "$name" == "$DEFAULT_PROTON" ]] && marker=" (default)"
+                echo "  ${name}${marker}"
+            done
+        fi
+    done
+
+    echo ""
+    info "Wine backends:"
+    if [[ -x "$WINE_CACHYOS" ]]; then
+        local wc_ver
+        wc_ver="$("$WINE_CACHYOS" --version 2>/dev/null || echo "unknown")"
+        echo "  wine-cachyos (/opt/wine-cachyos/bin/wine) — ${wc_ver}"
+    fi
+    if command -v wine >/dev/null 2>&1; then
+        local w_ver
+        w_ver="$(wine --version 2>/dev/null || echo "unknown")"
+        echo "  system wine ($(command -v wine)) — ${w_ver}"
+    fi
+}
+
+# --- Main ---
+
+[[ $# -gt 0 ]] || usage
+
+cmd="$1"
+shift
+
+case "$cmd" in
+    create)  cmd_create "$@" ;;
+    list|ls) cmd_list ;;
+    info)    cmd_info "$@" ;;
+    delete|rm) cmd_delete "$@" ;;
+    tricks)  cmd_tricks "$@" ;;
+    gamescope|gs) cmd_gamescope "$@" ;;
+    env)     cmd_env "$@" ;;
+    run)     cmd_run "$@" ;;
+    winecfg) cmd_winecfg "$@" ;;
+    protons) cmd_protons ;;
+    help|-h|--help) usage ;;
+    *)       die "unknown command: $cmd (try 'game-prefix help')" ;;
+esac

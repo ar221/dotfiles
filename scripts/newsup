@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Refresh newsboat RSS feeds and notify.
+# Replaces the old cron/newsup script (removed xdotool/dwmblocks X11 deps).
+
+readonly SCRIPT_NAME="$(basename "$0")"
+
+info()  { printf '[\e[34mINFO\e[0m]  %s\n' "$*"; }
+
+main() {
+    # If newsboat is running interactively, let the user handle it
+    if pgrep -f 'newsboat$' &>/dev/null; then
+        info "Newsboat is running — skipping background refresh"
+        exit 0
+    fi
+
+    info "Refreshing RSS feeds..."
+    if command -v notify-send &>/dev/null; then
+        notify-send "RSS Feeds" "Updating feeds..." \
+            --app-name="newsup" 2>/dev/null || true
+    fi
+
+    /usr/bin/newsboat -x reload 2>/dev/null
+
+    info "RSS feed update complete"
+    if command -v notify-send &>/dev/null; then
+        notify-send "RSS Feeds" "Feed update complete." \
+            --app-name="newsup" 2>/dev/null || true
+    fi
+}
+
+main "$@"

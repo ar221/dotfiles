@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly SCRIPT_NAME="$(basename "$0")"
+readonly VERSION="1.0.0"
+readonly STATE_DIR="$HOME/.local/state/sys-maintenance"
+readonly LOG_FILE="$STATE_DIR/last-run.log"
+
+# ─── Helpers ─────────────────────────────────────────────
+info()  { printf '[\e[34mINFO\e[0m]  %s\n' "$*"; }
+warn()  { printf '[\e[33mWARN\e[0m]  %s\n' "$*" >&2; }
+error() { printf '[\e[31mERROR\e[0m] %s\n' "$*" >&2; }
+die()   { error "$@"; exit 1; }
+
+DRY_RUN=0
+
+usage() {
+    cat <<EOF
+Usage: $SCRIPT_NAME [OPTIONS]
+
+Automated system maintenance: cache cleanup, journal vacuum, orphan check.
+Designed to run via systemd timer.
+
+Options:
+    -n, --dry-run    Show what would be done
+    -h, --help       Show this help
+    -V, --version    Show version
+EOF
+}
+
+# ─── Argument Parsing ────────────────────────────────────
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -n|--dry-run) DRY_RUN=1; shift ;;
+        -h|--help)    usage; exit 0 ;;
+        -V|--version) echo "$VERSION"; exit 0 ;;
+        *)            die "Unknown option: $1" ;;
+    esac
+done
+
+# ─── Main ────────────────────────────────────────────────
+main() {
+    mkdir -p "$STATE_DIR"
+
+    local summary=""
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+
+    info "Starting system maintenance at $timestamp"
+
+    # 1. Package cache cleanup (keep last 2 versions)
+    info "Cleaning package cache (keeping 2 versions)..."
+    local cache_before cache_after
+    cache_before=$(du -sb /var/cache/pacman/pkg/ 2>/dev/null | cut -f1 || echo 0)
+
+    if [[ $DRY_RUN -eq 1 ]]; then
+        paccache -dk2 2>/dev/null || true
+        info "[DRY-RUN] Would clean package cache"
+    else
+        paccache -rk2 2>/dev/null || true
+        cache_after=$(du -sb /var/cache/pacman/pkg/ 2>/dev/null | cut -f1 || echo 0)
+        local freed=$(( (cache_before - cache_after) / 1048576 ))
+        info "Package cache: freed ${freed}MB"
+        summary+="Cache: freed ${freed}MB. "
+    fi
+
+    # 2. Journal vacuum
+    info "Vacuuming journal to 200M..."
+    if [[ $DRY_RUN -eq 1 ]]; then
+        info "[DRY-RUN] Would vacuum journal"
+    else
+        journalctl --user --vacuum-size=100M 2>/dev/null || true
+        local journal_size
+        journal_size=$(journalctl --disk-usage 2>/dev/null | grep -oP '[\d.]+[GMK]' || echo "unknown")
+        info "Journal size: $journal_size"
+        summary+="Journal: $journal_size. "
+    fi
+
+    # 3. Orphan package count
+    local orphan_count
+    orphan_count=$(pacman -Qdtq 2>/dev/null | wc -l || echo 0)
+    info "Orphan packages: $orphan_count"
+    summary+="Orphans: $orphan_count."
+
+    # Log results
+    if [[ $DRY_RUN -eq 0 ]]; then
+        printf '%s | %s\n' "$timestamp" "$summary" >> "$LOG_FILE"
+
+        # Send desktop notification if available
+        if command -v notify-send &>/dev/null; then
+            notify-send "System Maintenance" "$summary" --app-name="sys-maintenance" 2>/dev/null || true
+        fi
+    fi
+
+    info "Maintenance complete: $summary"
+}
+
+main "$@"

@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+info()  { printf '[\e[34mINFO\e[0m]  %s\n' "$*"; }
+warn()  { printf '[\e[33mWARN\e[0m]  %s\n' "$*" >&2; }
+error() { printf '[\e[31mERROR\e[0m] %s\n' "$*" >&2; }
+die()   { error "$@"; exit 1; }
+
+readonly SDDM_CONF_DIR="/etc/sddm.conf.d"
+readonly RESTORE_DIR="$SDDM_CONF_DIR/restore-$(date +%s)"
+
+[[ $EUID -eq 0 ]] || die "Run with sudo: sudo $0"
+
+# ─── Step 1: Create restore point ────────────────────────
+info "Creating restore point at $RESTORE_DIR"
+mkdir -p "$RESTORE_DIR"
+cp "$SDDM_CONF_DIR/ii-sddm-theme.conf" "$RESTORE_DIR/"
+cp "$SDDM_CONF_DIR/inir-theme.conf" "$RESTORE_DIR/"
+info "Backed up both configs"
+
+# ─── Step 2: Remove conflicting config ───────────────────
+info "Removing conflicting inir-theme.conf (was overriding ii-sddm-theme)"
+rm "$SDDM_CONF_DIR/inir-theme.conf"
+info "Removed inir-theme.conf"
+
+# ─── Step 3: Show current state ──────────────────────────
+info "Current SDDM config:"
+echo "--- $SDDM_CONF_DIR/ii-sddm-theme.conf ---"
+cat "$SDDM_CONF_DIR/ii-sddm-theme.conf"
+echo ""
+info "Remaining files in $SDDM_CONF_DIR:"
+ls -la "$SDDM_CONF_DIR/" | grep -v "^total"
+
+# ─── Step 4: Switch from GDM to SDDM ────────────────────
+echo ""
+info "Current display manager status:"
+echo "  GDM:  $(systemctl is-enabled gdm 2>/dev/null || echo 'not found')"
+echo "  SDDM: $(systemctl is-enabled sddm 2>/dev/null || echo 'not found')"
+
+read -rp $'\n[INPUT] Switch from GDM to SDDM now? (y/N): ' answer
+if [[ "${answer,,}" == "y" ]]; then
+    systemctl disable gdm 2>/dev/null || true
+    systemctl enable sddm
+    info "SDDM enabled, GDM disabled. Changes take effect on next reboot."
+    info "To restore: sudo cp $RESTORE_DIR/* $SDDM_CONF_DIR/ && sudo systemctl disable sddm && sudo systemctl enable gdm"
+else
+    info "Skipped DM switch. Run manually when ready:"
+    echo "  sudo systemctl disable gdm && sudo systemctl enable sddm"
+fi
+
+echo ""
+info "Restore point: $RESTORE_DIR"
+info "To undo everything:"
+echo "  sudo cp $RESTORE_DIR/* $SDDM_CONF_DIR/ && sudo systemctl disable sddm && sudo systemctl enable gdm"

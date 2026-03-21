@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly STEAM_DIR="$HOME/.local/share/Steam"
+readonly STEAMUI_DIR="$STEAM_DIR/steamui"
+readonly LIBRARY_CSS="$STEAMUI_DIR/libraryroot.custom.css"
+readonly COLORTHEME_DIR="$STEAMUI_DIR/adwaita/colorthemes/matugen"
+readonly IMPORT_LINE='@import url("https://steamloopback.host/adwaita/colorthemes/matugen/matugen.css");'
+
+# Only proceed if Steam and the adwaita theme are installed
+[[ -d "$STEAMUI_DIR/adwaita" ]] || exit 0
+[[ -f "$LIBRARY_CSS" ]] || exit 0
+
+# Ensure the colortheme directory exists
+mkdir -p "$COLORTHEME_DIR"
+
+# Check if the import line already exists
+if ! grep -qF 'colorthemes/matugen/matugen.css' "$LIBRARY_CSS"; then
+    # Insert after the font import line
+    sed -i '/^@import.*fonts.*adwaita\.css/a \\n/* Material You Color Theme */\n'"$IMPORT_LINE" "$LIBRARY_CSS"
+fi

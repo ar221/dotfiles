@@ -1,0 +1,293 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly SCRIPT_NAME="$(basename "$0")"
+readonly VERSION="1.0.0"
+
+# ─── Helpers ─────────────────────────────────────────────
+info()  { printf '[\e[34mINFO\e[0m]  %s\n' "$*"; }
+warn()  { printf '[\e[33mWARN\e[0m]  %s\n' "$*" >&2; }
+error() { printf '[\e[31mERROR\e[0m] %s\n' "$*" >&2; }
+die()   { error "$@"; exit 1; }
+
+pass()  { printf '  [\e[32mPASS\e[0m] %s\n' "$*"; }
+pwarn() { printf '  [\e[33mWARN\e[0m] %s\n' "$*"; }
+fail()  { printf '  [\e[31mFAIL\e[0m] %s\n' "$*"; }
+
+section() { printf '\n\e[1;36m── %s ──\e[0m\n' "$*"; }
+
+PASS_COUNT=0
+WARN_COUNT=0
+FAIL_COUNT=0
+JSON_MODE=0
+BRIEF_MODE=0
+
+record_pass() { ((PASS_COUNT++)) || true; pass "$@"; }
+record_warn() { ((WARN_COUNT++)) || true; pwarn "$@"; }
+record_fail() { ((FAIL_COUNT++)) || true; fail "$@"; }
+
+usage() {
+    cat <<EOF
+Usage: $SCRIPT_NAME [OPTIONS]
+
+System health report — 7-phase diagnostic with color-coded results.
+
+Options:
+    --json       Output as JSON (machine-readable)
+    --brief      One-line summary only
+    -h, --help   Show this help
+    -V, --version Show version
+EOF
+}
+
+# ─── Argument Parsing ────────────────────────────────────
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --json)    JSON_MODE=1; shift ;;
+        --brief)   BRIEF_MODE=1; shift ;;
+        -h|--help) usage; exit 0 ;;
+        -V|--version) echo "$VERSION"; exit 0 ;;
+        *) die "Unknown option: $1" ;;
+    esac
+done
+
+# ─── Phase 1: Boot & Services ───────────────────────────
+check_boot() {
+    section "Boot & Services"
+
+    local boot_time
+    boot_time=$(systemd-analyze 2>/dev/null | head -1 | grep -oP '[\d.]+s\s*$' || echo "unknown")
+    printf '  Boot time: %s\n' "$boot_time"
+
+    local failed_system failed_user
+    failed_system=$(systemctl --failed --no-pager --no-legend 2>/dev/null | wc -l)
+    failed_user=$(systemctl --user --failed --no-pager --no-legend 2>/dev/null | wc -l)
+    local total_failed=$((failed_system + failed_user))
+
+    if [[ $total_failed -eq 0 ]]; then
+        record_pass "No failed services"
+    else
+        record_fail "$total_failed failed service(s)"
+        systemctl --failed --no-pager --no-legend 2>/dev/null | sed 's/^/    /'
+        systemctl --user --failed --no-pager --no-legend 2>/dev/null | sed 's/^/    /'
+    fi
+}
+
+# ─── Phase 2: Memory & Swap ─────────────────────────────
+check_memory() {
+    section "Memory & Swap"
+
+    local mem_total mem_used mem_pct
+    mem_total=$(free -m | awk '/Mem:/ {print $2}')
+    mem_used=$(free -m | awk '/Mem:/ {print $3}')
+    mem_pct=$((mem_used * 100 / mem_total))
+
+    printf '  RAM: %dM / %dM (%d%%)\n' "$mem_used" "$mem_total" "$mem_pct"
+
+    if [[ $mem_pct -lt 80 ]]; then
+        record_pass "Memory usage normal ($mem_pct%%)"
+    elif [[ $mem_pct -lt 90 ]]; then
+        record_warn "Memory usage elevated ($mem_pct%%)"
+    else
+        record_fail "Memory usage critical ($mem_pct%%)"
+    fi
+
+    local swappiness
+    swappiness=$(cat /proc/sys/vm/swappiness 2>/dev/null || echo "unknown")
+    printf '  Swappiness: %s\n' "$swappiness"
+
+    if swapon --show 2>/dev/null | grep -q zram; then
+        record_pass "zram swap active"
+    else
+        record_warn "No zram swap detected"
+    fi
+}
+
+# ─── Phase 3: Disk & Storage ────────────────────────────
+check_disk() {
+    section "Disk & Storage"
+
+    local root_pct
+    root_pct=$(df / --output=pcent 2>/dev/null | tail -1 | tr -d ' %')
+
+    if [[ $root_pct -lt 80 ]]; then
+        record_pass "Root filesystem at ${root_pct}%%"
+    elif [[ $root_pct -lt 90 ]]; then
+        record_warn "Root filesystem at ${root_pct}%% — consider cleanup"
+    else
+        record_fail "Root filesystem at ${root_pct}%% — critical"
+    fi
+
+    local pacman_cache
+    pacman_cache=$(du -sh /var/cache/pacman/pkg/ 2>/dev/null | cut -f1 || echo "unknown")
+    printf '  Pacman cache: %s\n' "$pacman_cache"
+
+    local user_cache
+    user_cache=$(du -sh "$HOME/.cache/" 2>/dev/null | cut -f1 || echo "unknown")
+    printf '  User cache: %s\n' "$user_cache"
+
+    local journal_size
+    journal_size=$(journalctl --disk-usage 2>/dev/null | grep -oP '[\d.]+[GMKB]+' || echo "unknown")
+    printf '  Journal: %s\n' "$journal_size"
+}
+
+# ─── Phase 4: Packages ──────────────────────────────────
+check_packages() {
+    section "Packages"
+
+    local explicit_count
+    explicit_count=$(pacman -Qqe 2>/dev/null | wc -l)
+    printf '  Explicit packages: %d\n' "$explicit_count"
+
+    local orphan_count
+    orphan_count=$(pacman -Qdtq 2>/dev/null | wc -l || echo 0)
+    if [[ $orphan_count -lt 10 ]]; then
+        record_pass "Orphan packages: $orphan_count"
+    elif [[ $orphan_count -lt 30 ]]; then
+        record_warn "Orphan packages: $orphan_count — review with: pacman -Qdtq"
+    else
+        record_fail "Orphan packages: $orphan_count — cleanup needed: pacman -Qdtq"
+    fi
+
+    local update_count
+    update_count=$(checkupdates 2>/dev/null | wc -l || echo 0)
+    if [[ $update_count -lt 20 ]]; then
+        record_pass "Pending updates: $update_count"
+    elif [[ $update_count -lt 50 ]]; then
+        record_warn "Pending updates: $update_count"
+    else
+        record_warn "Pending updates: $update_count — consider running sudo pacman -Syu"
+    fi
+}
+
+# ─── Phase 5: GPU ────────────────────────────────────────
+check_gpu() {
+    section "GPU"
+
+    # Check for amdgpu via multiple methods (module may be built-in)
+    if lsmod 2>/dev/null | grep -q amdgpu; then
+        record_pass "amdgpu driver loaded (module)"
+    elif [[ -d /sys/module/amdgpu ]]; then
+        record_pass "amdgpu driver active (built-in)"
+    elif lspci -k 2>/dev/null | grep -A2 VGA | grep -qi amdgpu; then
+        record_pass "amdgpu driver in use"
+    else
+        record_fail "amdgpu driver not detected"
+    fi
+
+    local power_mode
+    power_mode=$(cat /sys/class/drm/card*/device/power_dpm_force_performance_level 2>/dev/null | head -1 || echo "unknown")
+    printf '  Power mode: %s\n' "$power_mode"
+
+    if command -v sensors &>/dev/null; then
+        local gpu_temp
+        gpu_temp=$(sensors 2>/dev/null | grep -A2 amdgpu | grep -oP '\+\K[\d.]+' | head -1 || echo "")
+        if [[ -n "$gpu_temp" ]]; then
+            local temp_int=${gpu_temp%.*}
+            if [[ $temp_int -lt 80 ]]; then
+                record_pass "GPU temp: ${gpu_temp}°C"
+            elif [[ $temp_int -lt 90 ]]; then
+                record_warn "GPU temp: ${gpu_temp}°C — elevated"
+            else
+                record_fail "GPU temp: ${gpu_temp}°C — throttling risk"
+            fi
+        fi
+    fi
+}
+
+# ─── Phase 6: Critical Processes ─────────────────────────
+check_processes() {
+    section "Critical Processes"
+
+    for proc in niri pipewire wireplumber; do
+        if pgrep -x "$proc" &>/dev/null; then
+            record_pass "$proc running"
+        else
+            record_fail "$proc NOT running"
+        fi
+    done
+
+    if pgrep -f "qs " &>/dev/null; then
+        record_pass "Quickshell running"
+    else
+        record_fail "Quickshell NOT running"
+    fi
+}
+
+# ─── Phase 7: Network ───────────────────────────────────
+check_network() {
+    section "Network"
+
+    local port_count
+    port_count=$(ss -tlnp 2>/dev/null | tail -n +2 | wc -l)
+    printf '  Listening ports: %d\n' "$port_count"
+
+    if [[ $port_count -lt 15 ]]; then
+        record_pass "Port count reasonable ($port_count)"
+    else
+        record_warn "Many open ports ($port_count) — audit with: ss -tlnp"
+    fi
+}
+
+# ─── Summary ─────────────────────────────────────────────
+print_summary() {
+    local score=$((100 - FAIL_COUNT * 15 - WARN_COUNT * 5))
+    [[ $score -lt 0 ]] && score=0
+
+    if [[ $BRIEF_MODE -eq 1 ]]; then
+        printf 'Health: %d/100 | %d pass, %d warn, %d fail\n' "$score" "$PASS_COUNT" "$WARN_COUNT" "$FAIL_COUNT"
+        return
+    fi
+
+    printf '\n\e[1;37m══ Summary ══\e[0m\n'
+    printf '  Score: \e[1m%d/100\e[0m\n' "$score"
+    printf '  \e[32m%d passed\e[0m  \e[33m%d warnings\e[0m  \e[31m%d failures\e[0m\n' \
+        "$PASS_COUNT" "$WARN_COUNT" "$FAIL_COUNT"
+}
+
+print_json() {
+    local score=$((100 - FAIL_COUNT * 15 - WARN_COUNT * 5))
+    [[ $score -lt 0 ]] && score=0
+
+    printf '{"score":%d,"pass":%d,"warn":%d,"fail":%d}\n' \
+        "$score" "$PASS_COUNT" "$WARN_COUNT" "$FAIL_COUNT"
+}
+
+# ─── Main ────────────────────────────────────────────────
+run_all_checks() {
+    check_boot
+    check_memory
+    check_disk
+    check_packages
+    check_gpu
+    check_processes
+    check_network
+}
+
+main() {
+    if [[ $BRIEF_MODE -eq 1 ]]; then
+        run_all_checks &>/dev/null
+        print_summary
+        return
+    fi
+
+    if [[ $JSON_MODE -eq 1 ]]; then
+        run_all_checks &>/dev/null
+        print_json
+        return
+    fi
+
+    printf '\e[1;37m══ System Health Report ══\e[0m\n'
+    printf '  %s | %s\n' "$(date '+%Y-%m-%d %H:%M')" "$(hostname)"
+
+    check_boot
+    check_memory
+    check_disk
+    check_packages
+    check_gpu
+    check_processes
+    check_network
+    print_summary
+}
+
+main "$@"

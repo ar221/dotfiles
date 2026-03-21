@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Check for pending package updates and notify.
+# Replaces the old cron/checkup script (removed dwmblocks refs, uses checkupdates instead of sudo pacman).
+
+readonly SCRIPT_NAME="$(basename "$0")"
+
+info()  { printf '[\e[34mINFO\e[0m]  %s\n' "$*"; }
+
+main() {
+    local updates
+    updates=$(checkupdates 2>/dev/null || true)
+
+    if [[ -z "$updates" ]]; then
+        info "No updates available"
+        if command -v notify-send &>/dev/null; then
+            notify-send "Package Check" "System is up to date." \
+                --app-name="checkup" 2>/dev/null || true
+        fi
+    else
+        local count
+        count=$(echo "$updates" | wc -l)
+        info "$count update(s) available"
+        if command -v notify-send &>/dev/null; then
+            notify-send "Package Updates" "$count update(s) available. Run: sudo pacman -Syu" \
+                --app-name="checkup" 2>/dev/null || true
+        fi
+    fi
+}
+
+main "$@"

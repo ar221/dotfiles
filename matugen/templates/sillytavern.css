@@ -17,6 +17,13 @@
   /* Primary accent — replaces gold with wallpaper-derived color */
   --lux-gold: {{colors.primary.default.hex}};
 
+  /* Secondary & tertiary accents — wallpaper-derived */
+  --lux-secondary: {{colors.secondary.default.hex}};
+  --lux-accent-tertiary: {{colors.tertiary.default.hex}};
+
+  /* Semantic states — wallpaper-derived */
+  --lux-error: {{colors.error.default.hex}};
+
   /* Text — M3 on-surface scale */
   --lux-text-primary: {{colors.on_background.default.hex}};
   --lux-text-secondary: {{colors.on_surface_variant.default.hex}};

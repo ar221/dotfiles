@@ -544,10 +544,10 @@ class ContextBuilder:
 
 
 # ─── SSL cert generation ─────────────────────────────────
-def ensure_ssl_cert():
-    """Generate a self-signed cert if one doesn't exist."""
-    if CERT_FILE.exists() and KEY_FILE.exists():
-        return
+CERT_RENEW_THRESHOLD_DAYS = 7   # auto-regenerate if less than this remaining
+CERT_WARN_THRESHOLD_DAYS = 30   # log a warning below this
+
+def _generate_self_signed_cert():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     log.info("Generating self-signed SSL certificate...")
     subprocess.run([
@@ -557,6 +557,48 @@ def ensure_ssl_cert():
         "-subj", "/CN=dictation-server",
     ], check=True, capture_output=True)
     log.info(f"Certificate saved to {CERT_FILE}")
+
+
+def cert_days_remaining() -> int | None:
+    """Return days until cert expires, or None if cert is missing/unreadable."""
+    if not CERT_FILE.exists():
+        return None
+    try:
+        result = subprocess.run(
+            ["openssl", "x509", "-enddate", "-noout", "-in", str(CERT_FILE)],
+            capture_output=True, text=True, timeout=5, check=True,
+        )
+        # Output: "notAfter=May  1 12:00:00 2035 GMT"
+        end_str = result.stdout.strip().split("=", 1)[1]
+        from datetime import datetime, timezone
+        end_dt = datetime.strptime(end_str, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
+        delta = end_dt - datetime.now(timezone.utc)
+        return delta.days
+    except Exception as e:
+        log.warning(f"Failed to read cert expiry: {e}")
+        return None
+
+
+def ensure_ssl_cert():
+    """Generate a self-signed cert if missing; auto-renew if near expiry."""
+    if not (CERT_FILE.exists() and KEY_FILE.exists()):
+        _generate_self_signed_cert()
+        return
+
+    days = cert_days_remaining()
+    if days is None:
+        log.warning("Could not determine cert expiry — leaving existing cert in place")
+        return
+
+    if days < CERT_RENEW_THRESHOLD_DAYS:
+        log.warning(f"SSL cert expires in {days} days — auto-regenerating")
+        _generate_self_signed_cert()
+        return
+
+    if days < CERT_WARN_THRESHOLD_DAYS:
+        log.warning(f"SSL cert expires in {days} days — consider regenerating soon")
+    else:
+        log.info(f"SSL cert valid for {days} more days")
 
 
 # ─── Whisper transcription ────────────────────────────────
@@ -1725,6 +1767,19 @@ WEB_UI = r"""<!DOCTYPE html>
   }
   .toast.show { transform: translateX(-50%) translateY(0); }
 
+  .cert-banner {
+    display: none;
+    margin: 8px 16px 0;
+    padding: 10px 14px;
+    border-radius: var(--radius-sm);
+    background: var(--surface-high);
+    color: var(--text);
+    font-size: 13px;
+    border-left: 3px solid var(--primary);
+  }
+  .cert-banner.show { display: block; }
+  .cert-banner.urgent { border-left-color: var(--error); }
+
   .error-text { color: var(--error); font-size: 14px; text-align: center; }
 
   /* Duration display */
@@ -2193,6 +2248,8 @@ WEB_UI = r"""<!DOCTYPE html>
     <span id="statusText">Ready</span>
   </div>
 </div>
+
+<div class="cert-banner" id="certBanner" role="status" aria-live="polite"></div>
 
 <div class="controls">
   <select class="chip" id="modelSelect">
@@ -3576,6 +3633,22 @@ function setupEmbedMessaging() {
   });
 }
 
+async function checkCertHealth() {
+  try {
+    const resp = await fetch('/health');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (!data.cert_warning) return;
+    const banner = document.getElementById('certBanner');
+    if (!banner) return;
+    banner.textContent = '⚠ ' + data.cert_warning;
+    banner.classList.add('show');
+    if (typeof data.cert_expires_days === 'number' && data.cert_expires_days < 7) {
+      banner.classList.add('urgent');
+    }
+  } catch (_) { /* network flakes — silent */ }
+}
+
 // ─── Init ───────────────────────────────────────────────
 function init() {
   loadVadSettings();
@@ -3585,6 +3658,7 @@ function init() {
   loadCharacters();
   loadRecentChats();
   setupEmbedMessaging();
+  checkCertHealth();
 }
 
 if (document.readyState === 'loading') {
@@ -3731,7 +3805,17 @@ class DictationHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
         elif path == "/health":
-            self.send_json({"status": "ok"})
+            days = cert_days_remaining()
+            payload = {"status": "ok"}
+            if days is not None:
+                payload["cert_expires_days"] = days
+                if days < CERT_WARN_THRESHOLD_DAYS:
+                    payload["cert_warning"] = (
+                        f"SSL cert expires in {days} days — restart the service to auto-renew"
+                        if days >= CERT_RENEW_THRESHOLD_DAYS
+                        else f"SSL cert expires in {days} days — restart the service NOW to renew"
+                    )
+            self.send_json(payload)
         elif path == "/transcript":
             self.send_json({"transcript": session_transcript})
         elif path == "/transcript/export.md":

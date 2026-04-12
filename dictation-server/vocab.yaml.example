@@ -1,0 +1,10 @@
+# vocab.yaml.example — template for ~/.local/share/dictation-server/vocab.yaml
+# The live file is user state (character names, custom terms) — not tracked in git.
+# Copy this to ~/.local/share/dictation-server/vocab.yaml and populate it.
+#
+# Format: list of strings
+# Example:
+#   - Reinhardt
+#   - Syndra
+#   - Ahri
+[]

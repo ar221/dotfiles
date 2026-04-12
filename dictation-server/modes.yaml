@@ -1,0 +1,76 @@
+- id: plain
+  label: Plain
+  icon: mic
+  whisper_model: large-v3-turbo
+  pipeline:
+  - whisper
+  system_prompt: ''
+  temperature: 0.0
+  preset: default
+  use_persona: false
+  use_character: false
+  use_chat_context: false
+  use_rules: false
+- id: grammar_clean
+  label: Grammar Clean
+  icon: broom
+  whisper_model: large-v3-turbo
+  pipeline:
+  - whisper
+  - vocab_correct
+  - grammar_clean
+  system_prompt: Rewrite the following raw dictated speech with correct punctuation,
+    capitalization, and sentence structure. Preserve the speaker's exact meaning and
+    word choices; only fix mechanics. Do not add content. Output only the cleaned
+    text.
+  temperature: 0.2
+  preset: default
+  use_persona: false
+  use_character: false
+  use_chat_context: false
+  use_rules: false
+- id: rp_format
+  label: RP Format
+  icon: italic
+  whisper_model: large-v3-turbo
+  pipeline:
+  - whisper
+  - vocab_correct
+  - rp_format
+  system_prompt: ''
+  temperature: 0.4
+  preset: default
+  use_persona: false
+  use_character: false
+  use_chat_context: false
+  use_rules: false
+- id: rp_enhance
+  label: RP+
+  icon: sparkles
+  whisper_model: large-v3-turbo
+  pipeline:
+  - whisper
+  - vocab_correct
+  - rp_enhance
+  system_prompt: ''
+  temperature: 0.7
+  preset: pyrite
+  use_persona: true
+  use_character: true
+  use_chat_context: true
+  use_rules: false
+- id: persona_pov
+  label: Persona POV
+  icon: user
+  whisper_model: large-v3-turbo
+  pipeline:
+  - whisper
+  - vocab_correct
+  - persona_pov
+  system_prompt: ''
+  temperature: 0.7
+  preset: pyrite
+  use_persona: true
+  use_character: true
+  use_chat_context: true
+  use_rules: false

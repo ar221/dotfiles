@@ -1,0 +1,16 @@
+[Unit]
+Description=Remote dictation server (whisper.cpp over HTTPS)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/dictation-server
+Restart=on-failure
+RestartSec=5
+Environment=WHISPER_BIN=whisper-cli
+Environment=DICTATION_PROXY_URL=http://localhost:42069
+Environment=DICTATION_RP_MODEL=claude-sonnet-4-20250514
+
+[Install]
+WantedBy=default.target

@@ -1938,6 +1938,14 @@ WEB_UI = r"""<!DOCTYPE html>
   }
   .log-action-btn.regen:hover { color: var(--primary); border-color: var(--primary); }
   .log-action-btn.delete:hover { color: var(--error); border-color: var(--error); }
+  .log-action-btn.star { color: var(--text-dim); }
+  .log-action-btn.star:hover { color: var(--primary); border-color: var(--primary); }
+  .log-action-btn.star.active { color: var(--primary); }
+  .log-action-btn.star.active:hover { color: var(--primary); border-color: var(--primary); }
+  .log-entry.starred.user {
+    background: rgba(196, 167, 231, 0.15);
+    border-left: 4px solid var(--primary);
+  }
   .log-action-btn svg {
     width: 14px;
     height: 14px;
@@ -2407,7 +2415,10 @@ WEB_UI = r"""<!DOCTYPE html>
       <button type="button" class="download-log" id="downloadSessionBtn"
               onclick="event.stopPropagation(); downloadSession()"
               aria-label="Download session as markdown" disabled>Download</button>
-      <span class="clear-log" onclick="event.stopPropagation(); clearSession()">Clear</span>
+      <button type="button" class="download-log" id="starFilterBtn"
+              onclick="event.stopPropagation(); toggleStarFilter()"
+              aria-label="Show starred only" title="Toggle starred-only filter">&#9733;</button>
+      <span class="clear-log" onclick="event.stopPropagation(); clearSession(event)" title="Clear unstarred. Shift+click to clear all.">Clear</span>
     </span>
   </div>
   <div class="log-body" id="logBody">
@@ -3261,6 +3272,8 @@ const LOG_ICONS = {
   copy: '<svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>',
   regen: '<svg viewBox="0 0 24 24"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>',
   delete: '<svg viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2"/><path d="M6 6l1 14a2 2 0 002 2h6a2 2 0 002-2l1-14"/></svg>',
+  starEmpty: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>',
+  starFilled: '<svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>',
 };
 
 function renderLog() {
@@ -3279,13 +3292,23 @@ function renderLog() {
   }
 
   empty.style.display = 'none';
-  entries.innerHTML = sessionLog.map(e => {
-    const cls = e.role === 'context' ? 'context' : 'user';
+  const filterStarred = localStorage.getItem('dictation.log.filterStarred') === '1';
+  const displayed = filterStarred ? sessionLog.filter(e => e.starred) : sessionLog;
+
+  entries.innerHTML = displayed.map(e => {
+    const isUser = e.role === 'user';
+    const isStarred = isUser && !!e.starred;
+    const cls = [e.role === 'context' ? 'context' : 'user', isStarred ? 'starred' : ''].filter(Boolean).join(' ');
     const roleLabel = e.role === 'context' ? 'Partner' : 'You';
     const id = e.id || '';
     const ts = e.timestamp || '';
-    const isUser = e.role === 'user';
+    const starCls = isStarred ? 'star active' : 'star';
+    const starIcon = isStarred ? LOG_ICONS.starFilled : LOG_ICONS.starEmpty;
+    const starBtn = isUser
+      ? `<button type="button" class="log-action-btn ${starCls}" aria-label="${isStarred ? 'Unstar' : 'Star'}" data-action="star" data-id="${escHtml(id)}">${starIcon}</button>`
+      : '';
     const actions = [
+      starBtn,
       `<button type="button" class="log-action-btn copy" aria-label="Copy" data-action="copy" data-id="${escHtml(id)}">${LOG_ICONS.copy}</button>`,
       isUser
         ? `<button type="button" class="log-action-btn regen" aria-label="Regenerate" data-action="regen" data-id="${escHtml(id)}">${LOG_ICONS.regen}</button>`
@@ -3319,7 +3342,8 @@ document.addEventListener('click', (ev) => {
     return;
   }
   ev.stopPropagation();
-  if (action === 'copy') copyLogEntry(id);
+  if (action === 'star') toggleStarLogEntry(id, target);
+  else if (action === 'copy') copyLogEntry(id);
   else if (action === 'regen') regenLogEntry(id, target);
   else if (action === 'delete') deleteLogEntry(id);
 });
@@ -3338,6 +3362,32 @@ document.addEventListener('keydown', (ev) => {
 
 function _findEntry(id) {
   return sessionLog.find(e => e.id === id);
+}
+
+async function toggleStarLogEntry(id, btn) {
+  if (!id) return;
+  try {
+    const resp = await fetch('/transcript/' + encodeURIComponent(id) + '/star', {
+      method: 'POST',
+    });
+    if (resp.status === 404) {
+      const data = await resp.json().catch(() => ({}));
+      showToast('Entry missing');
+      await loadTranscript();
+      return;
+    }
+    if (!resp.ok) {
+      showToast('Star failed');
+      return;
+    }
+    const data = await resp.json();
+    // Update local mirror in-place, re-render
+    const entry = _findEntry(id);
+    if (entry) entry.starred = data.starred;
+    renderLog();
+  } catch {
+    showToast('Star failed');
+  }
 }
 
 async function copyLogEntry(id) {
@@ -3417,18 +3467,47 @@ function downloadSession() {
   window.open('/transcript/export.md', '_blank');
 }
 
+function toggleStarFilter() {
+  const active = localStorage.getItem('dictation.log.filterStarred') === '1';
+  localStorage.setItem('dictation.log.filterStarred', active ? '0' : '1');
+  const btn = document.getElementById('starFilterBtn');
+  if (btn) btn.style.color = active ? '' : 'var(--primary)';
+  renderLog();
+}
+
+// Apply star filter button visual on load
+(function initStarFilter() {
+  const btn = document.getElementById('starFilterBtn');
+  if (btn && localStorage.getItem('dictation.log.filterStarred') === '1') {
+    btn.style.color = 'var(--primary)';
+  }
+})();
+
 function escHtml(s) {
   const d = document.createElement('div');
   d.textContent = s;
   return d.innerHTML;
 }
 
-async function clearSession() {
+async function clearSession(ev) {
+  const wipeAll = ev && ev.shiftKey;
+  if (wipeAll && !confirm('Clear everything including starred takes?')) return;
   try {
-    await fetch('/transcript', { method: 'DELETE' });
-    sessionLog = [];
-    renderLog();
-    showToast('Session cleared');
+    const url = wipeAll ? '/transcript?all=1' : '/transcript';
+    const resp = await fetch(url, { method: 'DELETE' });
+    const data = await resp.json().catch(() => ({}));
+    await loadTranscript();
+    if (wipeAll) {
+      showToast('All entries cleared');
+    } else {
+      const kept = data.kept_starred || 0;
+      const cleared = data.cleared || 0;
+      if (kept > 0) {
+        showToast(`Cleared ${cleared} entries, kept ${kept} starred`);
+      } else {
+        showToast('Session cleared');
+      }
+    }
   } catch {
     showToast('Failed to clear');
   }
@@ -3713,27 +3792,41 @@ class DictationHandler(http.server.BaseHTTPRequestHandler):
         filename = f"dictation-session-{now.strftime('%Y-%m-%d-%H%M')}.md"
         exported_iso = now.isoformat()
 
-        lines: list[str] = []
-        lines.append(f"# Dictation Session — {header_date}")
-        lines.append("")
-        lines.append(f"_Exported at {exported_iso}. Entry count: {len(entries)}._")
-        lines.append("")
+        starred_entries = [e for e in entries if e.get("starred")]
+        all_entries = entries  # chronological full log
 
-        for e in entries:
+        def _render_entry(e: dict, out: list[str]) -> None:
             role = e.get("role", "user")
             label = "Partner" if role == "context" else "You"
             ts = e.get("timestamp", "")
             text = e.get("text", "")
-            lines.append(f"## [{label}] {ts}")
-            lines.append("")
+            out.append(f"## [{label}] {ts}")
+            out.append("")
             if role == "context":
                 for chunk in text.splitlines() or [""]:
-                    lines.append(f"> {chunk}")
+                    out.append(f"> {chunk}")
             else:
-                lines.append(text)
+                out.append(text)
+            out.append("")
+            out.append("---")
+            out.append("")
+
+        lines: list[str] = []
+        lines.append(f"# Dictation Session — {header_date}")
+        lines.append("")
+        lines.append(f"_Exported at {exported_iso}. Entry count: {len(entries)}. Starred: {len(starred_entries)}._")
+        lines.append("")
+
+        if starred_entries:
+            lines.append("## ⭐ Saved takes")
             lines.append("")
-            lines.append("---")
-            lines.append("")
+            for e in starred_entries:
+                _render_entry(e, lines)
+
+        lines.append("## Session log")
+        lines.append("")
+        for e in all_entries:
+            _render_entry(e, lines)
 
         body = ("\n".join(lines) + "\n").encode("utf-8")
         self.send_response(200)
@@ -3875,12 +3968,25 @@ class DictationHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_DELETE(self):
-        path = urllib.parse.urlparse(self.path).path
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        query = urllib.parse.parse_qs(parsed.query)
         if path == "/transcript":
+            wipe_all = query.get("all", ["0"])[0] == "1"
             with transcript_lock:
-                session_transcript.clear()
-            log.info("Session transcript cleared")
-            self.send_json({"status": "cleared"})
+                if wipe_all:
+                    cleared = len(session_transcript)
+                    kept = 0
+                    session_transcript.clear()
+                else:
+                    before = len(session_transcript)
+                    to_keep = [e for e in session_transcript if e.get("starred")]
+                    cleared = before - len(to_keep)
+                    kept = len(to_keep)
+                    session_transcript[:] = to_keep
+            log.info("Session transcript cleared (wipe_all=%s, cleared=%d, kept_starred=%d)",
+                     wipe_all, cleared, kept)
+            self.send_json({"cleared": cleared, "kept_starred": kept})
         elif path.startswith("/transcript/"):
             entry_id = urllib.parse.unquote(path[len("/transcript/"):]).strip()
             if not entry_id:
@@ -3937,6 +4043,22 @@ class DictationHandler(http.server.BaseHTTPRequestHandler):
             self._handle_reformat(params)
         elif path == "/vocab":
             self._handle_vocab_add()
+        elif path.startswith("/transcript/") and path.endswith("/star"):
+            # POST /transcript/<entry_id>/star — toggle starred on one entry
+            mid = path[len("/transcript/"):-len("/star")]
+            entry_id = urllib.parse.unquote(mid).strip()
+            if not entry_id:
+                self.send_error_json("Missing entry id in path",
+                                     code="missing_param", status=400)
+                return
+            with transcript_lock:
+                for e in session_transcript:
+                    if e.get("id") == entry_id:
+                        e["starred"] = not bool(e.get("starred", False))
+                        self.send_json({"entry_id": entry_id, "starred": e["starred"]})
+                        return
+            self.send_error_json(f"No transcript entry with id '{entry_id}'",
+                                 code="entry_not_found", status=404, retry_ok=False)
         else:
             self.send_response(404)
             self.end_headers()
@@ -4093,10 +4215,11 @@ class DictationHandler(http.server.BaseHTTPRequestHandler):
         with transcript_lock:
             if is_enhancement and not formatting_skipped:
                 if target_index is not None and target_index < len(session_transcript):
-                    # In-place replacement: keep id, update text + timestamp.
+                    # In-place replacement: keep id + starred, update text + timestamp.
                     existing = session_transcript[target_index]
                     existing["text"] = formatted
                     existing["timestamp"] = datetime.now().isoformat()
+                    # starred is preserved implicitly (dict mutation)
                     result_entry_id = existing.get("id")
                 else:
                     new_entry = {
@@ -4104,6 +4227,7 @@ class DictationHandler(http.server.BaseHTTPRequestHandler):
                         "role": "user",
                         "text": formatted,
                         "timestamp": datetime.now().isoformat(),
+                        "starred": False,
                     }
                     session_transcript.append(new_entry)
                     result_entry_id = new_entry["id"]
@@ -4213,6 +4337,7 @@ class DictationHandler(http.server.BaseHTTPRequestHandler):
                             "role": "context",
                             "text": context.strip(),
                             "timestamp": datetime.now().isoformat(),
+                            "starred": False,
                         })
 
             # Run pipeline
@@ -4234,6 +4359,7 @@ class DictationHandler(http.server.BaseHTTPRequestHandler):
                         "role": "user",
                         "text": output_text,
                         "timestamp": datetime.now().isoformat(),
+                        "starred": False,
                     })
 
             with transcript_lock:

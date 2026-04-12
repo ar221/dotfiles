@@ -19,10 +19,14 @@ VERBOSE=0
 PASTE_MODE=""  # empty = auto-detect
 FORMAT=0
 RP_MODE=0
+MODE_ID=""  # if set, route recorded audio through the server's modes pipeline
 
 # RP formatting config
 readonly PROXY_URL="http://localhost:42069"
 readonly RP_MODEL="claude-sonnet-4-20250514"
+
+# Server (for --mode path)
+readonly SERVER_URL="${DICTATION_SERVER_URL:-https://localhost:8384}"
 
 # ─── Helpers ─────────────────────────────────────────────
 info()  { printf '[\e[34mINFO\e[0m]  %s\n' "$*"; }
@@ -53,6 +57,11 @@ Options:
     --rp                RP format mode — structure as SillyTavern roleplay (*actions* + "dialogue")
     --rp+               RP enhance mode — format AND elevate prose (richer vocab, vivid descriptions)
                         Both RP modes require claude-code-proxy running on port 42069
+    --mode <id>         Route recording through the dictation-server modes pipeline
+                        (plain, grammar_clean, rp_format, rp_enhance, persona_pov, or custom).
+                        Server at \$DICTATION_SERVER_URL (default: https://localhost:8384).
+                        Overrides --rp/--rp+ when set. Falls back to local whisper if server offline.
+    --list-modes        List modes available on the dictation-server and exit
     --no-notify         Suppress desktop notifications
     -n, --dry-run       Show what would be done without doing it
     -v, --verbose       Increase output verbosity
@@ -83,6 +92,8 @@ while [[ $# -gt 0 ]]; do
         --format)      FORMAT=1; shift ;;
         --rp)          RP_MODE=1; shift ;;
         --rp+)         RP_MODE=2; shift ;;
+        --mode)        MODE_ID="$2"; shift 2 ;;
+        --list-modes)  MODE="list-modes"; shift ;;
         --no-notify)   NOTIFY=0; shift ;;
         -n|--dry-run)  DRY_RUN=1; shift ;;
         -v|--verbose)  VERBOSE=1; shift ;;
@@ -236,6 +247,56 @@ format_rp() {
     echo "$formatted"
 }
 
+# ─── Server-backed transcribe (--mode) ───────────────────
+transcribe_via_server() {
+    local audio="$1"
+    local mode_id="$2"
+
+    if ! curl -sfk --max-time 2 "${SERVER_URL}/health" &>/dev/null; then
+        warn "dictation-server unreachable at ${SERVER_URL} — falling back to local whisper"
+        notify "normal" "dialog-warning" "Dictation" "Server offline, using local pipeline"
+        return 1
+    fi
+
+    notify "low" "audio-x-generic" "Dictation" "Transcribing via server (${mode_id})..."
+
+    local response
+    response=$(curl -sfk --max-time 60 \
+        -X POST "${SERVER_URL}/transcribe?mode=${mode_id}" \
+        -H "Content-Type: audio/wav" \
+        --data-binary "@${audio}" 2>/dev/null) || {
+        warn "Server transcribe failed — falling back to local whisper"
+        return 1
+    }
+
+    local text skipped reason
+    text=$(echo "$response" | jq -r '.text // empty' 2>/dev/null)
+    skipped=$(echo "$response" | jq -r '.formatting_skipped // false' 2>/dev/null)
+    reason=$(echo "$response" | jq -r '.formatting_reason // empty' 2>/dev/null)
+
+    if [[ -z "$text" ]]; then
+        warn "Empty response from server"
+        [[ "$VERBOSE" -eq 1 ]] && info "Raw response: $response"
+        return 1
+    fi
+
+    if [[ "$skipped" == "true" && -n "$reason" ]]; then
+        notify "normal" "dialog-warning" "Dictation" "Formatting skipped: ${reason}"
+    fi
+
+    [[ "$VERBOSE" -eq 1 ]] && info "Server returned: $text"
+    printf '%s' "$text"
+}
+
+list_modes() {
+    if ! curl -sfk --max-time 2 "${SERVER_URL}/health" &>/dev/null; then
+        die "dictation-server unreachable at ${SERVER_URL}"
+    fi
+    curl -sfk --max-time 5 "${SERVER_URL}/modes" \
+        | jq -r '.modes[]? | "\(.id)\t\(.label // "")"' \
+        | column -t -s $'\t'
+}
+
 # ─── Recording ───────────────────────────────────────────
 start_recording() {
     if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
@@ -293,41 +354,53 @@ stop_and_transcribe() {
         return 1
     fi
 
-    notify "low" "audio-x-generic" "Dictation" "Transcribing..."
-
-    # Build whisper args
-    local whisper_args=(
-        -m "${MODEL_DIR}/ggml-${MODEL}.bin"
-        -f "$AUDIO_FILE"
-        --no-timestamps
-        --language en
-        --no-prints
-    )
-
-    if [[ "$USE_GPU" -eq 0 ]]; then
-        whisper_args+=(--no-gpu)
+    # Server-backed path: --mode routes through the dictation-server pipeline
+    local text=""
+    local used_server=0
+    if [[ -n "$MODE_ID" ]]; then
+        if text=$(transcribe_via_server "$AUDIO_FILE" "$MODE_ID"); then
+            used_server=1
+        else
+            text=""  # fall through to local path
+        fi
     fi
 
-    [[ "$VERBOSE" -eq 1 ]] && info "Running: $WHISPER_BIN ${whisper_args[*]}"
+    if [[ "$used_server" -eq 0 ]]; then
+        notify "low" "audio-x-generic" "Dictation" "Transcribing..."
 
-    # Transcribe
-    local text
-    text=$("$WHISPER_BIN" "${whisper_args[@]}" 2>/dev/null) || {
-        notify "normal" "dialog-error" "Dictation" "Transcription failed"
-        error "whisper-cli failed"
-        rm -f "$AUDIO_FILE"
-        return 1
-    }
+        # Build whisper args
+        local whisper_args=(
+            -m "${MODEL_DIR}/ggml-${MODEL}.bin"
+            -f "$AUDIO_FILE"
+            --no-timestamps
+            --language en
+            --no-prints
+        )
 
-    # Post-process: strip whitespace, collapse spaces
-    text=$(echo "$text" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr -s ' ')
+        if [[ "$USE_GPU" -eq 0 ]]; then
+            whisper_args+=(--no-gpu)
+        fi
 
-    # Apply voice command formatting
-    text=$(format_text "$text")
+        [[ "$VERBOSE" -eq 1 ]] && info "Running: $WHISPER_BIN ${whisper_args[*]}"
 
-    # Apply RP formatting via Claude proxy
-    if [[ "$RP_MODE" -gt 0 ]]; then
-        text=$(format_rp "$text")
+        # Transcribe
+        text=$("$WHISPER_BIN" "${whisper_args[@]}" 2>/dev/null) || {
+            notify "normal" "dialog-error" "Dictation" "Transcription failed"
+            error "whisper-cli failed"
+            rm -f "$AUDIO_FILE"
+            return 1
+        }
+
+        # Post-process: strip whitespace, collapse spaces
+        text=$(echo "$text" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr -s ' ')
+
+        # Apply voice command formatting
+        text=$(format_text "$text")
+
+        # Apply RP formatting via Claude proxy
+        if [[ "$RP_MODE" -gt 0 ]]; then
+            text=$(format_rp "$text")
+        fi
     fi
 
     if [[ -z "$text" ]]; then
@@ -360,6 +433,12 @@ stop_and_transcribe() {
 
 # ─── Main ────────────────────────────────────────────────
 main() {
+    # list-modes short-circuits before deps/lock — it only needs curl + jq
+    if [[ "$MODE" == "list-modes" ]]; then
+        list_modes
+        return
+    fi
+
     check_deps
 
     # Brief flock to prevent race conditions from rapid double-presses.

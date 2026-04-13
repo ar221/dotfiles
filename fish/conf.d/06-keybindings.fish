@@ -5,8 +5,8 @@ if status is-interactive
     # Key Bindings
     # ============================================================================
     
-    # Ctrl-O for lfcd (file manager)
-    bind \co 'lfcd; commandline -f repaint'
+    # Ctrl-O for yazi (file manager with cd on exit)
+    bind \co 'y; commandline -f repaint'
     
     # Ctrl-A for calculator
     bind \ca 'bc -lq; commandline -f repaint'

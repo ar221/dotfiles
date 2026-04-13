@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# bak-clean — Move .bak.* files from ~/.local/bin/ to ~/.cache/script-baks/
+
+readonly BAK_DIR="$HOME/.cache/script-baks"
+mkdir -p "$BAK_DIR"
+
+shopt -s nullglob
+baks=("$HOME/.local/bin/"*.bak.*)
+shopt -u nullglob
+
+if (( ${#baks[@]} == 0 )); then
+    echo "No .bak files found in ~/.local/bin/"
+    exit 0
+fi
+
+echo "Moving ${#baks[@]} .bak file(s) to $BAK_DIR:"
+for f in "${baks[@]}"; do
+    echo "  $(basename "$f")"
+    mv "$f" "$BAK_DIR/"
+done
+echo "Done."

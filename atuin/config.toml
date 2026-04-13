@@ -1,0 +1,6 @@
+## Atuin config — local only, no cloud sync
+sync_address = ""
+auto_sync = false
+search_mode = "fuzzy"
+filter_mode = "global"
+style = "compact"

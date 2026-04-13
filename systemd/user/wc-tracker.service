@@ -1,0 +1,7 @@
+[Unit]
+Description=Snapshot Wild Card MO2 profile state
+
+[Service]
+Type=oneshot
+ExecCondition=/usr/bin/pgrep -f "node.*server.js"
+ExecStart=%h/.local/bin/wc-snapshot --quiet

@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodic Wild Card profile snapshots (every 30 min)
+
+[Timer]
+OnCalendar=*:00/30
+RandomizedDelaySec=2m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

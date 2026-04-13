@@ -1,0 +1,7 @@
+[Unit]
+Description=Detect config drift between live configs and dotfiles repos
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/dotfiles-drift --notify
+SuccessExitStatus=1

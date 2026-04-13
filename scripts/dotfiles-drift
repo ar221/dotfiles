@@ -129,10 +129,14 @@ main() {
 
     # Summary
     printf '\n'
+    # Append one-line status to drift log (fish greeting can read this)
+    local log_file="$HOME/.cache/drift.log"
     if [[ $DRIFT_FOUND -eq 0 ]]; then
         info "All configs in sync"
+        echo "$(date '+%Y-%m-%d %H:%M') CLEAN" > "$log_file"
     else
         warn "Drift detected — review and sync as needed"
+        echo "$(date '+%Y-%m-%d %H:%M') DRIFT" > "$log_file"
         if [[ $NOTIFY -eq 1 ]] && command -v notify-send &>/dev/null; then
             notify-send "Dotfiles Drift" "Config drift detected. Run dotfiles-drift -v for details." \
                 --app-name="dotfiles-drift" 2>/dev/null || true

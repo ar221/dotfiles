@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly SCRIPT_NAME="$(basename "$0")"
+readonly VERSION="0.1.0"
+readonly STATE_DIR="${HOME}/.cache/focus-session"
+readonly STATE_FILE="${STATE_DIR}/active"
+
+info()  { printf '[\e[34mINFO\e[0m]  %s\n' "$*"; }
+warn()  { printf '[\e[33mWARN\e[0m]  %s\n' "$*" >&2; }
+error() { printf '[\e[31mERROR\e[0m] %s\n' "$*" >&2; }
+die()   { error "$@"; exit 1; }
+
+usage() {
+    cat <<EOF
+Usage: $SCRIPT_NAME <subcommand>
+
+Toggle distraction-free focus mode.
+
+Subcommands:
+    enter     Activate focus mode (guard: exits if already active)
+    exit      Deactivate focus mode (guard: exits if not active)
+    toggle    Enter if inactive, exit if active
+    status    Show current state
+
+Options:
+    -h, --help       Show this help
+    -V, --version    Show version ($VERSION)
+EOF
+}
+
+is_active() {
+    [[ -f "$STATE_FILE" ]]
+}
+
+cmd_enter() {
+    if is_active; then
+        warn "Focus mode is already active. Use 'exit' or 'toggle' to deactivate."
+        exit 1
+    fi
+
+    notify-send -t 3000 "Focus Mode" "Entering focus mode…"
+
+    dunstctl set-paused true
+    qs msg -c inir sidebarLeft close
+    qs msg -c inir sidebarRight close
+    niri msg action maximize-column
+
+    mkdir -p "$STATE_DIR"
+    date -Iseconds > "$STATE_FILE"
+
+    info "Focus mode ON"
+}
+
+cmd_exit() {
+    if ! is_active; then
+        info "Focus mode is not active."
+        exit 0
+    fi
+
+    dunstctl set-paused false
+    rm -f "$STATE_FILE"
+
+    notify-send -t 3000 "Focus Mode" "Focus mode OFF"
+
+    info "Focus mode OFF"
+}
+
+cmd_toggle() {
+    if is_active; then
+        cmd_exit
+    else
+        cmd_enter
+    fi
+}
+
+cmd_status() {
+    if is_active; then
+        local since
+        since="$(cat "$STATE_FILE")"
+        info "Focus mode: ACTIVE (since ${since})"
+    else
+        info "Focus mode: INACTIVE"
+    fi
+}
+
+[[ $# -eq 0 ]] && { usage; exit 1; }
+
+case "$1" in
+    enter)   cmd_enter ;;
+    exit)    cmd_exit ;;
+    toggle)  cmd_toggle ;;
+    status)  cmd_status ;;
+    -h|--help)    usage; exit 0 ;;
+    -V|--version) printf '%s %s\n' "$SCRIPT_NAME" "$VERSION"; exit 0 ;;
+    *) die "Unknown subcommand: $1. See '$SCRIPT_NAME --help'." ;;
+esac

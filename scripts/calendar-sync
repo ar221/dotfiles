@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+"""Sync CalDAV calendars and convert .ics → JSON for iNiR shell consumption.
+
+Pipeline: vdirsyncer sync → parse .ics → write caldav-events.json
+Designed to run from a systemd timer every 30 minutes.
+"""
+
+import argparse
+import json
+import logging
+import subprocess
+import sys
+from datetime import datetime, timedelta, date, time
+from pathlib import Path
+
+try:
+    from icalendar import Calendar
+except ImportError:
+    print("ERROR: python-icalendar not installed. Run: sudo pacman -S python-icalendar", file=sys.stderr)
+    sys.exit(1)
+
+CALENDARS_DIR = Path.home() / ".local/share/calendars"
+OUTPUT_PATH = Path.home() / ".local/state/quickshell/user/caldav-events.json"
+LOOKAHEAD_DAYS = 90
+
+log = logging.getLogger("calendar-sync")
+
+
+def run_vdirsyncer() -> bool:
+    """Run vdirsyncer sync. Returns True on success."""
+    try:
+        result = subprocess.run(
+            ["vdirsyncer", "sync"],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode != 0:
+            log.warning("vdirsyncer sync failed (rc=%d): %s", result.returncode, result.stderr.strip())
+            return False
+        log.info("vdirsyncer sync completed")
+        return True
+    except FileNotFoundError:
+        log.error("vdirsyncer not found — install with: sudo pacman -S vdirsyncer")
+        return False
+    except subprocess.TimeoutExpired:
+        log.error("vdirsyncer sync timed out after 120s")
+        return False
+
+
+def expand_rrule(vevent, start_dt: datetime, horizon: datetime) -> list[datetime]:
+    """Expand RRULE into occurrences up to horizon. Basic support only."""
+    try:
+        from dateutil.rrule import rrulestr
+        rule_text = vevent.get("RRULE").to_ical().decode()
+        dtstart = start_dt
+        rule = rrulestr(f"RRULE:{rule_text}", dtstart=dtstart)
+        return [dt for dt in rule.between(datetime.now(), horizon, inc=True)]
+    except Exception:
+        return []
+
+
+def parse_ics_file(path: Path, now: datetime, horizon: datetime) -> list[dict]:
+    """Parse a single .ics file into event dicts."""
+    events = []
+    try:
+        cal = Calendar.from_ical(path.read_bytes())
+    except Exception as e:
+        log.warning("Failed to parse %s: %s", path, e)
+        return events
+
+    for component in cal.walk():
+        if component.name != "VEVENT":
+            continue
+
+        summary = str(component.get("SUMMARY", ""))
+        if not summary:
+            continue
+
+        dtstart = component.get("DTSTART")
+        dtend = component.get("DTEND")
+        if not dtstart:
+            continue
+
+        dt_val = dtstart.dt
+        all_day = isinstance(dt_val, date) and not isinstance(dt_val, datetime)
+
+        if all_day:
+            start = datetime.combine(dt_val, time.min)
+        else:
+            start = dt_val if isinstance(dt_val, datetime) else datetime.combine(dt_val, time.min)
+            if start.tzinfo:
+                start = start.astimezone().replace(tzinfo=None)
+
+        end_str = ""
+        if dtend:
+            end_val = dtend.dt
+            if isinstance(end_val, datetime):
+                end_dt = end_val.astimezone().replace(tzinfo=None) if end_val.tzinfo else end_val
+                end_str = end_dt.strftime("%H:%M")
+            elif isinstance(end_val, date) and all_day:
+                end_str = ""
+
+        description = str(component.get("DESCRIPTION", ""))
+        location = str(component.get("LOCATION", ""))
+        uid = str(component.get("UID", ""))
+        calendar_name = path.parent.name
+
+        def make_event(dt: datetime) -> dict:
+            return {
+                "uid": uid,
+                "title": summary,
+                "description": description,
+                "location": location,
+                "dateTime": dt.isoformat(),
+                "endTime": end_str,
+                "allDay": all_day,
+                "time": "All day" if all_day else dt.strftime("%H:%M"),
+                "calendar": calendar_name,
+                "source": "caldav",
+            }
+
+        if component.get("RRULE"):
+            occurrences = expand_rrule(component, start, horizon)
+            for occ in occurrences:
+                events.append(make_event(occ))
+            if not occurrences and now <= start <= horizon:
+                events.append(make_event(start))
+        else:
+            if start >= now - timedelta(days=1) and start <= horizon:
+                events.append(make_event(start))
+
+    return events
+
+
+def parse_all_calendars() -> list[dict]:
+    """Walk all .ics files under CALENDARS_DIR and parse events."""
+    now = datetime.now()
+    horizon = now + timedelta(days=LOOKAHEAD_DAYS)
+    events = []
+
+    if not CALENDARS_DIR.exists():
+        log.info("No calendars directory at %s", CALENDARS_DIR)
+        return events
+
+    for ics_file in CALENDARS_DIR.rglob("*.ics"):
+        events.extend(parse_ics_file(ics_file, now, horizon))
+
+    events.sort(key=lambda e: e["dateTime"])
+    log.info("Parsed %d events from %d .ics files", len(events), len(list(CALENDARS_DIR.rglob("*.ics"))))
+    return events
+
+
+def write_output(events: list[dict]) -> None:
+    """Write parsed events to JSON file for QML consumption."""
+    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "lastSync": datetime.now().isoformat(),
+        "eventCount": len(events),
+        "events": events,
+    }
+    OUTPUT_PATH.write_text(json.dumps(data, indent=2))
+    log.info("Wrote %d events to %s", len(events), OUTPUT_PATH)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Sync CalDAV calendars and export to JSON")
+    parser.add_argument("--no-sync", action="store_true", help="Skip vdirsyncer, only parse existing .ics files")
+    parser.add_argument("--dry-run", action="store_true", help="Parse and print, don't write output file")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(name)s: %(message)s",
+    )
+
+    if not args.no_sync:
+        run_vdirsyncer()
+
+    events = parse_all_calendars()
+
+    if args.dry_run:
+        print(json.dumps(events, indent=2))
+        return
+
+    write_output(events)
+
+
+if __name__ == "__main__":
+    main()

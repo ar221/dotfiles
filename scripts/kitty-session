@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# kitty-session — Launch kitty with a named session layout
+# Usage: kitty-session <name>
+# Available sessions: trading, writing
+
+SESSIONS_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/kitty/sessions"
+
+usage() {
+    echo "Usage: kitty-session <session-name>"
+    echo ""
+    echo "Available sessions:"
+    for f in "$SESSIONS_DIR"/*.conf; do
+        [[ -f "$f" ]] && echo "  $(basename "${f%.conf}")"
+    done
+    exit 1
+}
+
+[[ $# -lt 1 ]] && usage
+
+session="$1"
+session_file="$SESSIONS_DIR/${session}.conf"
+
+if [[ ! -f "$session_file" ]]; then
+    echo "Error: Unknown session '$session'"
+    usage
+fi
+
+exec kitty --session "$session_file"

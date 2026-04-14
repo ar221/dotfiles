@@ -23,6 +23,8 @@ cookies.txt
 fish/fish_history
 fish/fish_variables
 fish/completions/
+fish/conf.d/50-local.fish
+fish/conf.d/flatpak.fish
 
 # Bat cache
 bat/cache/

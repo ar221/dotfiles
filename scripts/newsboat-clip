@@ -26,10 +26,13 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import sqlite3
+
 from lxml import html as lxml_html
 from readability import Document
 
 VAULT_CLIPPINGS = Path.home() / "Documents" / "Ayaz OS" / "00 Notes" / "Clippings"
+NEWSBOAT_CACHE = Path.home() / ".local" / "share" / "newsboat" / "cache.db"
 LOG_FILE = Path.home() / ".local" / "state" / "newsboat-clip.log"
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0"
@@ -58,6 +61,29 @@ def slugify(text: str, max_len: int = 80) -> str:
     text = re.sub(r"[^\w\s-]", "", text, flags=re.UNICODE).strip()
     text = re.sub(r"\s+", " ", text)
     return text[:max_len].strip() or "untitled"
+
+
+def newsboat_rss_title(url: str) -> str | None:
+    """Return the RSS entry title for a URL from Newsboat's cache, if known.
+
+    Newsboat's SQLite cache holds the title the user actually saw in the UI,
+    which is authoritative — the fetched-HTML title is often useless (Reddit
+    serves `<title>Reddit</title>` to scrapers, for example).
+    """
+    if not NEWSBOAT_CACHE.exists():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{NEWSBOAT_CACHE}?mode=ro", uri=True, timeout=2.0)
+        cur = conn.execute(
+            "SELECT title FROM rss_item WHERE url = ? LIMIT 1", (url,)
+        )
+        row = cur.fetchone()
+        conn.close()
+        if row and row[0]:
+            return row[0].strip() or None
+    except (sqlite3.Error, OSError) as e:
+        log(f"newsboat cache lookup failed for {url}: {e}")
+    return None
 
 
 def fetch_html(url: str) -> str:
@@ -160,6 +186,12 @@ def main() -> int:
                 meta["title"] = doc.short_title()
         except Exception as e:
             log(f"readability failed for {url}: {e}")
+
+    # Newsboat RSS title is authoritative — overrides scraped HTML title
+    # which is frequently garbage on Reddit, YouTube, and other gated sites.
+    rss_title = newsboat_rss_title(url)
+    if rss_title and rss_title.lower() not in ("reddit", "youtube"):
+        meta["title"] = rss_title
 
     # Fall back to Newsboat's rendered body when web extraction yields nothing.
     if not article_md:

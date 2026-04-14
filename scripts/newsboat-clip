@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""newsboat-clip — capture the current Newsboat article to the vault Clippings folder.
+
+Wired via a Newsboat macro:
+
+    macro c pipe-to "newsboat-clip '%u'"
+
+Workflow:
+  1. Read URL from argv, Newsboat's rendered body from stdin (fallback).
+  2. Fetch the URL; run readability-lxml to extract the main article HTML.
+  3. Pipe that HTML through pandoc → markdown.
+  4. Scrape title / description / published / author via lxml meta tags.
+  5. Write a markdown file with curator-compatible frontmatter to the vault.
+
+If the fetch fails or readability can't find content, fall back to the
+Newsboat-rendered stdin body so we never lose the clip.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import re
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+from lxml import html as lxml_html
+from readability import Document
+
+VAULT_CLIPPINGS = Path.home() / "Documents" / "Ayaz OS" / "00 Notes" / "Clippings"
+LOG_FILE = Path.home() / ".local" / "state" / "newsboat-clip.log"
+USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0"
+)
+FETCH_TIMEOUT = 8.0
+META_KEYS = {
+    "title": ("og:title", "twitter:title"),
+    "description": ("og:description", "twitter:description", "description"),
+    "published": (
+        "article:published_time",
+        "og:article:published_time",
+        "datePublished",
+    ),
+    "author": ("article:author", "og:article:author", "author"),
+}
+
+
+def log(msg: str) -> None:
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    ts = dt.datetime.now().isoformat(timespec="seconds")
+    with LOG_FILE.open("a", encoding="utf-8") as f:
+        f.write(f"[{ts}] {msg}\n")
+
+
+def slugify(text: str, max_len: int = 80) -> str:
+    text = re.sub(r"[^\w\s-]", "", text, flags=re.UNICODE).strip()
+    text = re.sub(r"\s+", " ", text)
+    return text[:max_len].strip() or "untitled"
+
+
+def fetch_html(url: str) -> str:
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as r:
+            raw = r.read()
+            enc = r.headers.get_content_charset() or "utf-8"
+            return raw.decode(enc, errors="replace")
+    except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
+        log(f"fetch failed for {url}: {e}")
+        return ""
+
+
+def meta_from_tree(tree, key: str) -> str | None:
+    for name in META_KEYS[key]:
+        for attr in ("property", "name"):
+            results = tree.xpath(
+                f'//meta[translate(@{attr}, "ABCDEFGHIJKLMNOPQRSTUVWXYZ",'
+                f' "abcdefghijklmnopqrstuvwxyz")=$n]/@content',
+                n=name.lower(),
+            )
+            if results:
+                val = (results[0] or "").strip()
+                if val:
+                    return val
+    return None
+
+
+def extract_meta(tree) -> dict[str, str | None]:
+    meta = {k: meta_from_tree(tree, k) for k in META_KEYS}
+    # Fallback title: <title>
+    if not meta["title"]:
+        t = tree.xpath("//title/text()")
+        if t:
+            meta["title"] = t[0].strip()
+    # Normalize published → YYYY-MM-DD
+    if meta["published"]:
+        meta["published"] = meta["published"][:10]
+    return meta
+
+
+def pandoc_html_to_md(html_snippet: str) -> str:
+    try:
+        result = subprocess.run(
+            [
+                "pandoc",
+                "--from=html",
+                "--to=markdown_strict-raw_html+pipe_tables",
+                "--wrap=none",
+            ],
+            input=html_snippet,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=True,
+        )
+        return result.stdout.strip()
+    except (subprocess.SubprocessError, FileNotFoundError) as e:
+        log(f"pandoc failed: {e}")
+        return ""
+
+
+def yaml_str(s: str | None) -> str:
+    if not s:
+        return ""
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def strip_site_suffix(title: str) -> str:
+    return re.sub(r"\s+[|–—-]\s+[^|–—-]{1,40}$", "", title).strip()
+
+
+def main() -> int:
+    if len(sys.argv) < 2 or not sys.argv[1] or sys.argv[1] == "%u":
+        print("usage: newsboat-clip <url>  (reads article body from stdin)", file=sys.stderr)
+        log(f"bad invocation: argv={sys.argv!r}")
+        return 2
+
+    url = sys.argv[1].strip()
+    stdin_body = sys.stdin.read() if not sys.stdin.isatty() else ""
+
+    raw_html = fetch_html(url)
+    tree = None
+    article_md = ""
+    meta: dict[str, str | None] = {k: None for k in META_KEYS}
+
+    if raw_html:
+        try:
+            tree = lxml_html.fromstring(raw_html)
+            meta = extract_meta(tree)
+        except Exception as e:
+            log(f"lxml parse failed: {e}")
+
+        try:
+            doc = Document(raw_html)
+            article_html = doc.summary(html_partial=True)
+            article_md = pandoc_html_to_md(article_html)
+            if not meta.get("title"):
+                meta["title"] = doc.short_title()
+        except Exception as e:
+            log(f"readability failed for {url}: {e}")
+
+    # Fall back to Newsboat's rendered body when web extraction yields nothing.
+    if not article_md:
+        article_md = stdin_body.rstrip() or "_(no body captured — fetch URL manually)_"
+
+    title = strip_site_suffix((meta.get("title") or "Untitled").strip())
+    today = dt.date.today().isoformat()
+    published = meta.get("published") or today
+    timestamp = dt.datetime.now().strftime("%Y-%m-%d %H%M")
+    slug = slugify(title)
+
+    fname = f"™ Clip {timestamp} — {slug}.md"
+    VAULT_CLIPPINGS.mkdir(parents=True, exist_ok=True)
+    out = VAULT_CLIPPINGS / fname
+
+    lines = ["---", "type: clipping", f"title: {yaml_str(title)}", f"source: {yaml_str(url)}"]
+    if meta.get("author"):
+        lines += ["author:", f'  - "[[{meta["author"]}]]"']
+    else:
+        lines.append("author:")
+    lines += [f"published: {published}", f"created: {today}"]
+    if meta.get("description"):
+        lines.append(f"description: {yaml_str(meta['description'])}")
+    else:
+        lines.append("description:")
+    lines += ["tags:", "  - clippings", "  - newsboat", "status: inbox", "---", ""]
+
+    out.write_text("\n".join(lines) + "\n" + article_md + "\n", encoding="utf-8")
+    log(f"clipped {url} -> {out.name}")
+    print(f"Clipped: {fname}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

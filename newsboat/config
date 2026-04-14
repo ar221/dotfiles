@@ -15,6 +15,7 @@ macro v set browser "setsid -f mpv --really-quiet %u >/dev/null 2>&1 &" ; open-i
 macro o set browser "setsid -f firefox %u >/dev/null 2>&1 &" ; open-in-browser ; set browser "urlhandler %u"
 macro i set browser "reddit-img %u &" ; open-in-browser ; set browser "urlhandler %u"
 macro I pipe-to "reddit-img --html &"
+macro c pipe-to "newsboat-clip '%u'"
 
 # keybindings
 bind-key j down

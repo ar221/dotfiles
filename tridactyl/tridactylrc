@@ -1,0 +1,88 @@
+" ~/.config/tridactyl/tridactylrc
+" Reload in Firefox with :source
+
+" ───── Reset ─────
+sanitise tridactyllocal tridactylsync
+
+" ───── Leaders ─────
+" `,` → act on current URL
+" `;` → hint mode (pick a link on the page, then act)
+
+" ─── Media / external apps ────────────────────────────────────────────
+" ;v — hint a link, pipe it to mpv (videos, YT, twitch, direct .mp4/.mkv)
+bind ;v hint -W mpv
+
+" ,v — pipe CURRENT tab URL to mpv
+bind ,v exclaim_quiet setsid -f mpv --really-quiet %u
+
+" ;u — hint a link, dispatch via urlhandler (mpv/imv/firefox by type)
+bind ;u hint -W exclaim_quiet urlhandler
+
+" ,u — urlhandler on current tab
+bind ,u exclaim_quiet urlhandler %u
+
+" ;i — hint a link, open in imv (image viewer)
+bind ;i hint -W exclaim_quiet sh -c 'curl -sL "$0" | setsid -f imv -'
+
+" ,i — reddit-img on current tab
+bind ,i exclaim_quiet reddit-img %u
+
+" ,I — pipe current page HTML to reddit-img
+bind ,I composite get_current_url | exclaim_quiet reddit-img
+
+" ,o — force-open current URL in a new Firefox tab (escape hatch after ,v etc.)
+bind ,o tabopen %u
+
+" ,d — download current page
+bind ,d exclaim_quiet setsid -f wget -q %u
+
+" ,y — yank current URL (built-in `yy` also works)
+bind ,y clipboard yank
+
+" ─── Quick-search engines ─────────────────────────────────────────────
+set searchurls.aw        https://wiki.archlinux.org/?search=%s
+set searchurls.aur       https://aur.archlinux.org/packages?K=%s
+set searchurls.pkg       https://archlinux.org/packages/?q=%s
+set searchurls.gh        https://github.com/search?q=%s
+set searchurls.nexus     https://www.nexusmods.com/search/?gsearch=%s
+set searchurls.yt        https://www.youtube.com/results?search_query=%s
+set searchurls.rd        https://www.reddit.com/search/?q=%s
+set searchurls.mdn       https://developer.mozilla.org/en-US/search?q=%s
+set searchurls.qml       https://doc.qt.io/qt-6/search-results.html?q=%s
+set hintuppercase false
+
+" ─── UX tweaks ────────────────────────────────────────────────────────
+set smoothscroll true
+set hintfiltermode vimperator-reflow
+set editorcmd kitty -e nvim
+set tabopenpos last
+set newtab about:blank
+
+" Native `:` ex-mode shows commands in the command line — keep it visible
+set modeindicator true
+
+" ─── Blacklists (let the site's own keybinds work) ────────────────────
+blacklistadd mail.google.com
+blacklistadd app.element.io
+blacklistadd youtube.com/tv
+blacklistadd figma.com
+
+" ─── Theme ─ Material-ish dark ────────────────────────────────────────
+colorscheme dark
+
+" ─── Handy extras ─────────────────────────────────────────────────────
+" gcp — copy a clean permalink (no tracking params) of current tab
+bind gcp composite get_current_url | js -p JS_ARG.replace(/[?&](utm_[^=]+|fbclid|gclid|ref)=[^&]*/g,'') | clipboard yank
+
+" ;t — hint-open link in a new tab in the background
+bind ;t hint -b
+
+" ;w — hint-open link in a new window
+bind ;w hint -w
+
+" j/k scroll a bit faster
+bind j scrollline 3
+bind k scrollline -3
+
+" Esc is `escapehatch` — drops focus from any input back to normal mode
+bind <Escape> composite unfocus | mode normal

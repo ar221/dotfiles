@@ -1,0 +1,207 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "WebSearch",
+      "WebFetch",
+      "Agent",
+      "Bash(git *)",
+      "Bash(gh *)",
+      "Bash(qs msg *)",
+      "Bash(pacman -Q*)",
+      "Bash(pacman -S --needed *)",
+      "Bash(pacman -Syu*)",
+      "Bash(paru -Q*)",
+      "Bash(paru -S --needed *)",
+      "Bash(paru -Syu*)",
+      "Bash(which *)",
+      "Bash(type *)",
+      "Bash(command -v *)",
+      "Bash(systemctl --user *)",
+      "Bash(journalctl --user *)",
+      "Bash(python *)",
+      "Bash(python3 *)",
+      "Bash(node *)",
+      "Bash(npx *)",
+      "Bash(npm *)",
+      "Bash(pip *)",
+      "Bash(ls *)",
+      "Bash(stat *)",
+      "Bash(file *)",
+      "Bash(diff *)",
+      "Bash(wc *)",
+      "Bash(sort *)",
+      "Bash(jq *)",
+      "Bash(date *)",
+      "Bash(id *)",
+      "Bash(uname *)",
+      "Bash(uptime *)",
+      "Bash(free *)",
+      "Bash(df *)",
+      "Bash(du *)",
+      "Bash(lsblk *)",
+      "Bash(ip *)",
+      "Bash(ss *)",
+      "Bash(ps *)",
+      "Bash(pgrep *)",
+      "Bash(rocm-smi*)",
+      "Bash(dmesg *)",
+      "Bash(lspci *)",
+      "Bash(lsusb *)",
+      "Bash(secret-tool lookup *)",
+      "Bash(matugen *)",
+      "Bash(rsync --dry-run *)",
+      "Bash(fish -c *)",
+      "Bash(bash -c *)",
+      "Bash(chmod *)",
+      "Bash(mkdir *)",
+      "Bash(cp *)",
+      "Bash(mv *)",
+      "Bash(ln *)",
+      "Bash(touch *)",
+      "Bash(tee *)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "Bash(tr *)",
+      "Bash(cut *)",
+      "Bash(sed *)",
+      "Bash(awk *)",
+      "Bash(find *)",
+      "Bash(xargs *)",
+      "Bash(realpath *)",
+      "Bash(readlink *)",
+      "Bash(basename *)",
+      "Bash(dirname *)",
+      "Bash(md5sum *)",
+      "Bash(sha256sum *)",
+      "Bash(echo *)",
+      "Bash(printf *)",
+      "Bash(test *)",
+      "Bash(env)",
+      "Bash(env *)",
+      "Bash(getent *)",
+      "Bash(tree *)",
+      "Bash(column *)",
+      "Bash(rm *)"
+    ],
+    "deny": [
+      "Bash(rm -rf /)*",
+      "Bash(chmod 777 *)",
+      "Bash(git push --force *)",
+      "Bash(git push --force-with-lease origin main*)",
+      "Bash(pacman -Sy)",
+      "Bash(*killall qs*)",
+      "Bash(*pkill qs*)",
+      "Bash(*kill*quickshell*)"
+    ]
+  },
+  "model": "opus[1m]",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /home/ayaz/.claude/hooks/load-memory.py",
+            "timeout": 10,
+            "statusMessage": "Loading memory..."
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --directory /home/ayaz/Documents/Ayaz OS/llm-personal-kb python /home/ayaz/Documents/Ayaz OS/llm-personal-kb/hooks/session-start.py",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --directory /home/ayaz/Documents/Ayaz OS/llm-personal-kb python /home/ayaz/Documents/Ayaz OS/llm-personal-kb/hooks/session-end.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/ayaz/.local/bin/claude-stop-hook",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/ayaz/.local/bin/claude-precompact-hook",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --directory /home/ayaz/Documents/Ayaz OS/llm-personal-kb python /home/ayaz/Documents/Ayaz OS/llm-personal-kb/hooks/pre-compact.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/ayaz/.claude/hooks/local-bin-register.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/ayaz/.claude/hooks/block-batch-delete.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "bash /home/ayaz/.claude/statusline-command.sh"
+  },
+  "enabledPlugins": {
+    "frontend-design@claude-plugins-official": true,
+    "clangd-lsp@claude-plugins-official": true
+  },
+  "effortLevel": "medium",
+  "advisorModel": "opus",
+  "skipDangerousModePermissionPrompt": true
+}

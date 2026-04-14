@@ -1,0 +1,9 @@
+[Unit]
+Description=Hermione — weekly RSS feed audit of vault Clippings
+Documentation=man:hermione(1)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/hermione --quiet
+Nice=10
+IOSchedulingClass=idle

@@ -1,0 +1,300 @@
+#!/usr/bin/env python3
+"""hermione — weekly audit of the vault Clippings folder for RSS/Atom feeds.
+
+Retainer model: runs on a timer (or manually), scans every clipping's `source:`
+URL, deduplicates by domain, skips domains already in the Newsboat urls file,
+fetches each candidate site's HTML head, looks for `<link rel="alternate">`
+feed declarations, and writes findings to `Feed Candidates.md` in the vault.
+
+The candidates file has a `## Pending` section that hermione regenerates on
+every run. Anything outside that section (user notes, rejected entries, etc.)
+is preserved. To reject a candidate, move its block out of Pending or delete
+its domain from the file — hermione won't resurface rejected domains if they
+appear in a `## Rejected` section.
+
+Usage:
+    hermione            # full audit
+    hermione --dry-run  # print what would change without writing
+    hermione --quiet    # no stdout (timer mode)
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import re
+import sys
+import urllib.error
+import urllib.request
+from collections import defaultdict
+from pathlib import Path
+from urllib.parse import urljoin, urlparse
+
+from lxml import html as lxml_html
+
+VAULT = Path.home() / "Documents" / "Ayaz OS"
+CLIPPINGS = VAULT / "00 Notes" / "Clippings"
+CANDIDATES = VAULT / "00 Notes" / "Inbox" / "Feed Candidates.md"
+NEWSBOAT_URLS = Path.home() / ".config" / "newsboat" / "urls"
+LOG_FILE = Path.home() / ".local" / "state" / "hermione.log"
+
+USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0"
+)
+FETCH_TIMEOUT = 8.0
+HEAD_READ_BYTES = 200_000  # Most sites declare feeds in first ~50KB
+
+PENDING_BEGIN = "<!-- hermione:pending-begin -->"
+PENDING_END = "<!-- hermione:pending-end -->"
+
+
+def log(msg: str) -> None:
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    ts = dt.datetime.now().isoformat(timespec="seconds")
+    with LOG_FILE.open("a", encoding="utf-8") as f:
+        f.write(f"[{ts}] {msg}\n")
+
+
+def normalize_domain(host: str | None) -> str | None:
+    if not host:
+        return None
+    host = host.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host or None
+
+
+def domain_of(url: str) -> str | None:
+    try:
+        return normalize_domain(urlparse(url).hostname)
+    except ValueError:
+        return None
+
+
+def extract_source(md_path: Path) -> tuple[str, str] | None:
+    """Return (source_url, clipping_title) from a clipping's frontmatter."""
+    try:
+        text = md_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    # Only scan the frontmatter block
+    fm_match = re.match(r"^---\n(.*?)\n---", text, re.S)
+    fm = fm_match.group(1) if fm_match else text[:2000]
+    src = re.search(r'^source:\s*"?([^"\n]+?)"?\s*$', fm, re.M)
+    title = re.search(r'^title:\s*"?([^"\n]+?)"?\s*$', fm, re.M)
+    if not src:
+        return None
+    return src.group(1).strip(), (title.group(1).strip() if title else md_path.stem)
+
+
+def subscribed_domains() -> set[str]:
+    if not NEWSBOAT_URLS.exists():
+        return set()
+    out: set[str] = set()
+    for raw in NEWSBOAT_URLS.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        url = line.split()[0]
+        d = domain_of(url)
+        if d:
+            out.add(d)
+    return out
+
+
+def rejected_domains(existing_text: str) -> set[str]:
+    """Parse any ## Rejected section for domains the user has dismissed."""
+    m = re.search(
+        r"^##+\s*Rejected.*?$(.*?)(?=^##\s|\Z)",
+        existing_text,
+        re.S | re.M | re.I,
+    )
+    if not m:
+        return set()
+    block = m.group(1)
+    return {
+        normalize_domain(h)
+        for h in re.findall(r"(?:^|\s)([a-z0-9][\w.-]*\.[a-z]{2,})", block, re.I)
+        if normalize_domain(h)
+    }
+
+
+def fetch_head(url: str) -> str:
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as r:
+            raw = r.read(HEAD_READ_BYTES)
+            enc = r.headers.get_content_charset() or "utf-8"
+            return raw.decode(enc, errors="replace")
+    except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
+        log(f"fetch fail {url}: {e}")
+        return ""
+
+
+def discover_feeds(base_url: str, html_text: str) -> list[tuple[str, str]]:
+    """Return [(feed_url, title), ...] absolute URLs from <link rel=alternate>."""
+    if not html_text:
+        return []
+    try:
+        tree = lxml_html.fromstring(html_text)
+    except Exception as e:
+        log(f"parse fail {base_url}: {e}")
+        return []
+    feeds: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for link in tree.xpath('//link[@rel="alternate"]'):
+        t = (link.get("type") or "").lower()
+        if not any(marker in t for marker in ("rss", "atom")):
+            continue
+        href = link.get("href")
+        if not href:
+            continue
+        absolute = urljoin(base_url, href)
+        if absolute in seen:
+            continue
+        seen.add(absolute)
+        title = (link.get("title") or "").strip()
+        feeds.append((absolute, title))
+    return feeds
+
+
+def render_candidate_block(
+    domain: str,
+    feeds: list[tuple[str, str]],
+    clips: list[str],
+    first_seen: str,
+) -> str:
+    lines = [f"### {domain}"]
+    for feed_url, feed_title in feeds:
+        label = f" — {feed_title}" if feed_title else ""
+        lines.append(f"- Feed: `{feed_url}`{label}")
+    lines.append(f"- Surfaced by {len(clips)} clip{'s' if len(clips) != 1 else ''}:")
+    for c in sorted(clips)[:5]:
+        lines.append(f"  - {c}")
+    if len(clips) > 5:
+        lines.append(f"  - …and {len(clips) - 5} more")
+    lines.append(f"- First seen: {first_seen}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def load_existing(path: Path) -> str:
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    return (
+        "# Feed Candidates\n\n"
+        "Feeds surfaced by `hermione` from your Clippings. Triage when you feel like it.\n"
+        "Promote keepers to `Wiki/RSS Feeds.md` (or straight into `~/.config/newsboat/urls`);\n"
+        "move dismissed ones under `## Rejected` so they won't resurface.\n\n"
+        f"{PENDING_BEGIN}\n## Pending\n\n_(empty — hermione hasn't run yet)_\n{PENDING_END}\n\n"
+        "## Rejected\n\n"
+        "_(list domains here — one per line or in prose — to prevent hermione from resurfacing them)_\n"
+    )
+
+
+def splice_pending(existing: str, new_pending: str) -> str:
+    """Replace content between the pending markers with new_pending."""
+    pattern = re.compile(
+        re.escape(PENDING_BEGIN) + r".*?" + re.escape(PENDING_END),
+        re.S,
+    )
+    replacement = f"{PENDING_BEGIN}\n{new_pending}{PENDING_END}"
+    if pattern.search(existing):
+        return pattern.sub(replacement, existing)
+    # Markers missing (user edited file) — append a fresh pending block
+    return existing.rstrip() + "\n\n" + replacement + "\n"
+
+
+def main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(description="Audit Clippings for RSS feed candidates.")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--quiet", action="store_true")
+    args = ap.parse_args(argv)
+
+    if not CLIPPINGS.exists():
+        print(f"Clippings folder not found: {CLIPPINGS}", file=sys.stderr)
+        log(f"abort: missing {CLIPPINGS}")
+        return 1
+
+    subscribed = subscribed_domains()
+    existing_text = load_existing(CANDIDATES)
+    rejected = rejected_domains(existing_text)
+
+    # Group clippings by source domain
+    domain_to_clips: dict[str, list[str]] = defaultdict(list)
+    domain_to_sample_url: dict[str, str] = {}
+    domain_to_first_seen: dict[str, dt.date] = {}
+
+    for md in CLIPPINGS.glob("*.md"):
+        got = extract_source(md)
+        if not got:
+            continue
+        url, title = got
+        d = domain_of(url)
+        if not d or d in subscribed or d in rejected:
+            continue
+        domain_to_clips[d].append(title)
+        domain_to_sample_url.setdefault(d, url)
+        # Use file mtime as a proxy for first-seen date
+        mtime = dt.date.fromtimestamp(md.stat().st_mtime)
+        if d not in domain_to_first_seen or mtime < domain_to_first_seen[d]:
+            domain_to_first_seen[d] = mtime
+
+    if not domain_to_clips:
+        if not args.quiet:
+            print("No unsubscribed domains found in Clippings.")
+        log("no candidates")
+        new_pending = "## Pending\n\n_(empty — nothing to review)_\n\n"
+        updated = splice_pending(existing_text, new_pending)
+        if not args.dry_run:
+            CANDIDATES.parent.mkdir(parents=True, exist_ok=True)
+            CANDIDATES.write_text(updated, encoding="utf-8")
+        return 0
+
+    if not args.quiet:
+        print(f"Scanning {len(domain_to_clips)} candidate domain(s)…")
+
+    blocks: list[str] = []
+    found_count = 0
+
+    for domain in sorted(domain_to_clips.keys()):
+        sample_url = domain_to_sample_url[domain]
+        html_text = fetch_head(sample_url)
+        feeds = discover_feeds(sample_url, html_text)
+        if not feeds:
+            log(f"{domain}: no feed found")
+            continue
+        found_count += 1
+        clips = domain_to_clips[domain]
+        first_seen = domain_to_first_seen[domain].isoformat()
+        blocks.append(render_candidate_block(domain, feeds, clips, first_seen))
+        if not args.quiet:
+            print(f"  ✓ {domain} ({len(feeds)} feed, {len(clips)} clip{'s' if len(clips) != 1 else ''})")
+
+    run_stamp = dt.datetime.now().isoformat(timespec="minutes")
+    header = (
+        f"## Pending\n\n"
+        f"_Last audit: {run_stamp} — {found_count} candidate(s) with feeds; "
+        f"{len(domain_to_clips) - found_count} domain(s) had no declared feed._\n\n"
+    )
+    body = "\n".join(blocks) if blocks else "_(no feeds discovered this run)_\n"
+    new_pending = header + body + "\n"
+
+    updated = splice_pending(existing_text, new_pending)
+
+    if args.dry_run:
+        if not args.quiet:
+            print("--- DRY RUN ---")
+            print(new_pending)
+        return 0
+
+    CANDIDATES.parent.mkdir(parents=True, exist_ok=True)
+    CANDIDATES.write_text(updated, encoding="utf-8")
+    log(f"run ok: {found_count} feeds across {len(domain_to_clips)} domains")
+    if not args.quiet:
+        print(f"Wrote {CANDIDATES}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

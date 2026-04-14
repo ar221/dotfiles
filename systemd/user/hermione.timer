@@ -1,0 +1,10 @@
+[Unit]
+Description=Hermione weekly audit — Sunday 09:00
+
+[Timer]
+OnCalendar=Sun 09:00
+Persistent=true
+RandomizedDelaySec=15min
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""scribe-vault-sync — mirror a scribe journal entry into the vault's session log.
+
+The scribe agent invokes this after writing a journal entry, so the user's
+Obsidian vault reflects what actually happened in each Claude Code session —
+closing the gap between the agent memory silo and the second-brain silo.
+
+Symmetric with `inir-log-sync` (commits → vault history). Sentinel-tracked so
+re-runs are idempotent. Creates the target ™ Session Log.md on first use.
+
+Usage:
+    scribe-vault-sync --domain <name> --summary "<one-line>" \\
+                      [--journal <path>] [--session-id <uuid>] [--dry-run]
+
+Domains (maps to `03 Projects/<folder>/™ Session Log.md`):
+    system | inir | stwork | modding | comfyui | ayaz-os
+
+    `system` is special — landing folder is `03 Projects/System/` (created
+    lazily). Everything else maps to an existing vault project folder.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import re
+import sys
+from pathlib import Path
+
+VAULT_ROOT = Path.home() / "Documents" / "Ayaz OS"
+PROJECTS_ROOT = VAULT_ROOT / "03 Projects"
+
+DOMAIN_FOLDERS = {
+    "system": "System",
+    "inir": "iNiR",
+    "stwork": "STWork",
+    "modding": "My Modded New Vegas",
+    "comfyui": "ComfyWork",
+    "ayaz-os": "Ayaz OS Meta",
+}
+
+SENTINEL_RE = re.compile(
+    r"<!--\s*scribe-vault-sync:last=(?P<stamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2})"
+    r"(?::(?P<session>[\w-]+))?\s*-->"
+)
+
+
+def vault_file_for(domain: str) -> Path:
+    if domain not in DOMAIN_FOLDERS:
+        raise SystemExit(
+            f"unknown domain '{domain}'. known: {', '.join(sorted(DOMAIN_FOLDERS))}"
+        )
+    return PROJECTS_ROOT / DOMAIN_FOLDERS[domain] / "™ Session Log.md"
+
+
+def header_for(domain: str) -> str:
+    folder = DOMAIN_FOLDERS[domain]
+    return (
+        f"# {folder} — Session Log\n\n"
+        "> Mirror of scribe journal entries relevant to this domain.\n"
+        "> One bullet per Claude Code session; details live in the linked journal file.\n"
+        "> Managed by `scribe-vault-sync`. Edit freely below the sentinel —\n"
+        "> new entries are inserted under today's date section.\n\n"
+        "---\n\n"
+    )
+
+
+def ensure_file(path: Path, domain: str) -> str:
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return header_for(domain)
+
+
+def find_or_insert_date_section(content: str, date: str) -> tuple[str, int]:
+    """Return (updated_content, insertion_index_for_bullet).
+
+    Ensures a `## <date>` section exists near the top (most recent first). The
+    insertion index is the position just after the section header where a new
+    bullet should be inserted. If the section already exists, insert at the
+    TOP of its bullet list so newest bullets stay at the top within a day.
+    """
+    header = f"## {date}"
+    lines = content.split("\n")
+
+    # Look for existing section
+    for i, line in enumerate(lines):
+        if line.strip() == header:
+            # Insert right after the header (and after any blank line)
+            insert_at = i + 1
+            while insert_at < len(lines) and lines[insert_at].strip() == "":
+                insert_at += 1
+            return content, _index_from_line(lines, insert_at)
+
+    # Section doesn't exist — insert a new one after the `---` separator
+    # of the frontmatter header (or at the very end if no separator).
+    sep_index = None
+    for i, line in enumerate(lines):
+        if line.strip() == "---":
+            sep_index = i
+            break
+
+    new_section = ["", header, ""]
+    if sep_index is not None:
+        # Insert after `---` + any blank line
+        insert_line = sep_index + 1
+        while insert_line < len(lines) and lines[insert_line].strip() == "":
+            insert_line += 1
+        lines[insert_line:insert_line] = new_section
+        insertion_line = insert_line + len(new_section)
+    else:
+        # No separator — append at end
+        if lines and lines[-1].strip() != "":
+            lines.append("")
+        lines.extend(new_section)
+        insertion_line = len(lines)
+
+    rebuilt = "\n".join(lines)
+    return rebuilt, _index_from_line(rebuilt.split("\n"), insertion_line)
+
+
+def _index_from_line(lines: list[str], line_idx: int) -> int:
+    """Convert line index into a character offset for splicing."""
+    return sum(len(l) + 1 for l in lines[:line_idx])
+
+
+def insert_bullet(content: str, offset: int, bullet: str) -> str:
+    ins = bullet.rstrip() + "\n"
+    return content[:offset] + ins + content[offset:]
+
+
+def strip_sentinel(content: str) -> str:
+    return SENTINEL_RE.sub("", content).rstrip() + "\n"
+
+
+def append_sentinel(content: str, stamp: str, session_id: str | None) -> str:
+    suffix = f":{session_id}" if session_id else ""
+    marker = f"<!-- scribe-vault-sync:last={stamp}{suffix} -->"
+    return content.rstrip() + "\n\n" + marker + "\n"
+
+
+def last_sentinel(content: str) -> tuple[str | None, str | None]:
+    matches = list(SENTINEL_RE.finditer(content))
+    if not matches:
+        return None, None
+    m = matches[-1]
+    return m.group("stamp"), m.group("session")
+
+
+def build_bullet(
+    time_str: str, summary: str, journal: str | None, session_id: str | None
+) -> str:
+    bullet = f"- `{time_str}` {summary}"
+    suffix_parts = []
+    if journal:
+        journal_path = Path(journal).expanduser().resolve()
+        if journal_path.exists():
+            suffix_parts.append(f"[journal →](file://{journal_path})")
+        else:
+            suffix_parts.append(f"journal: `{journal}`")
+    if session_id:
+        suffix_parts.append(f"`session:{session_id[:8]}`")
+    if suffix_parts:
+        bullet += " — " + " · ".join(suffix_parts)
+    return bullet
+
+
+def main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--domain", required=True, help="Target domain (see --help).")
+    ap.add_argument("--summary", required=True, help="One-line session summary.")
+    ap.add_argument("--journal", help="Absolute path to the scribe journal file.")
+    ap.add_argument("--session-id", help="Optional session UUID for dedup.")
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args(argv)
+
+    domain = args.domain.lower().strip()
+    path = vault_file_for(domain)
+
+    content = ensure_file(path, domain)
+
+    now = dt.datetime.now()
+    date_str = now.strftime("%Y-%m-%d")
+    time_str = now.strftime("%H:%M")
+    stamp = f"{date_str}T{time_str}"
+
+    # Dedup on session_id — if sentinel shows same session already synced,
+    # skip silently. Time-stamp dedup is less reliable (two tasks in same
+    # minute → second one drops), so prefer session UUID when provided.
+    if args.session_id:
+        last_stamp, last_session = last_sentinel(content)
+        if last_session == args.session_id:
+            if not args.dry_run:
+                print(f"already synced for session {args.session_id[:8]}, skipping")
+            return 0
+
+    content = strip_sentinel(content)
+    content, offset = find_or_insert_date_section(content, date_str)
+
+    bullet = build_bullet(time_str, args.summary.strip(), args.journal, args.session_id)
+    content = insert_bullet(content, offset, bullet)
+    content = append_sentinel(content, stamp, args.session_id)
+
+    if args.dry_run:
+        print(f"--- DRY RUN: would write {path} ---")
+        print(content)
+        return 0
+
+    path.write_text(content, encoding="utf-8")
+    print(f"synced → {path}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

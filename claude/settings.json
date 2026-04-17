@@ -4,6 +4,8 @@
       "Read",
       "Edit",
       "Write",
+      "Write(/home/ayaz/.claude/agents/**)",
+      "Edit(/home/ayaz/.claude/agents/**)",
       "Glob",
       "Grep",
       "WebSearch",
@@ -199,7 +201,18 @@
   },
   "enabledPlugins": {
     "frontend-design@claude-plugins-official": true,
-    "clangd-lsp@claude-plugins-official": true
+    "clangd-lsp@claude-plugins-official": true,
+    "superpowers@claude-plugins-official": true,
+    "context7@claude-plugins-official": true,
+    "andrej-karpathy-skills@karpathy-skills": true
+  },
+  "extraKnownMarketplaces": {
+    "karpathy-skills": {
+      "source": {
+        "source": "github",
+        "repo": "forrestchang/andrej-karpathy-skills"
+      }
+    }
   },
   "effortLevel": "medium",
   "advisorModel": "opus",

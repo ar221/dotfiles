@@ -15,6 +15,7 @@ import http.server
 import json
 import logging
 import os
+import queue
 import re
 import secrets
 import shutil
@@ -43,8 +44,20 @@ DATA_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) /
 CERT_FILE = DATA_DIR / "cert.pem"
 KEY_FILE = DATA_DIR / "key.pem"
 WHISPER_BIN = os.environ.get("WHISPER_BIN", "whisper-cli")
-PROXY_URL = os.environ.get("DICTATION_PROXY_URL", "http://localhost:42069")
-RP_MODEL = os.environ.get("DICTATION_RP_MODEL", "claude-sonnet-4-20250514")
+CLAUDE_PROXY_URL = os.environ.get(
+    "DICTATION_CLAUDE_PROXY_URL",
+    os.environ.get("DICTATION_PROXY_URL", "http://localhost:42069"),
+)
+CLAUDE_RP_MODEL = os.environ.get(
+    "DICTATION_CLAUDE_RP_MODEL",
+    os.environ.get("DICTATION_RP_MODEL", "claude-sonnet-4-20250514"),
+)
+OPENAI_PROXY_URL = os.environ.get("DICTATION_OPENAI_PROXY_URL", "http://127.0.0.1:10531/v1")
+OPENAI_RP_MODEL = os.environ.get("DICTATION_OPENAI_RP_MODEL", "gpt-5.4")
+OPENAI_CLEAN_MODEL = os.environ.get("DICTATION_OPENAI_CLEAN_MODEL", "gpt-5.4-mini")
+DEFAULT_FORMATTER_PROVIDER = os.environ.get("DICTATION_FORMATTER_PROVIDER", "claude").strip().lower()
+if DEFAULT_FORMATTER_PROVIDER not in {"claude", "openai"}:
+    DEFAULT_FORMATTER_PROVIDER = "claude"
 DEFAULT_MODEL = "large-v3-turbo"
 TRANSCRIPT_CONTEXT_LIMIT = 3000  # max chars of transcript to include in RP+ prompt
 PERSONAS_DIR = Path(os.environ.get("DICTATION_PERSONAS_DIR", Path.home() / "STWork/personas"))
@@ -62,13 +75,83 @@ CHAT_CONTEXT_WINDOW = 8  # number of recent messages to include
 _CONFIG_EXT = "yaml" if _HAVE_YAML else "json"
 MODES_FILE = DATA_DIR / f"modes.{_CONFIG_EXT}"
 VOCAB_FILE = DATA_DIR / f"vocab.{_CONFIG_EXT}"
+CHAR_MODES_FILE = DATA_DIR / f"char-modes.{_CONFIG_EXT}"
 WHISPER_PROMPT_TOKEN_CAP = 200  # approx; we truncate by word count
+
+# Phase 3 — ST state sync
+STATE_FRESH_SECONDS = 60    # < this = fresh, banner shows "Following ST"
+STATE_STALE_SECONDS = 120   # between fresh and this = stale, banner warns
+# > STATE_STALE_SECONDS = dead, server UI reverts to manual
+DISFLUENCY_CLEAN_MODEL = os.environ.get(
+    "DICTATION_CLEANUP_MODEL", "claude-haiku-4-5-20251001"
+)
+DISFLUENCY_CLEAN_TIMEOUT = 3.0  # seconds; falls through to raw on timeout
+DISFLUENCY_CLEAN_MAX_WORDS = 500  # skip cleanup if input exceeds this
 
 log = logging.getLogger("dictation-server")
 
 # ─── Session transcript (in-memory) ──────────────────────
 session_transcript: list[dict] = []
 transcript_lock = threading.Lock()
+
+# ─── Phase 3: ST state (in-memory, TTL-governed) ─────────
+# Single source of truth for what ST is currently doing. ST extension POSTs
+# here on chat/char/persona change + 30s heartbeat. Phone UI reads on load
+# and poll to auto-configure.
+st_state: dict = {
+    "chatId": "",
+    "chatType": "",
+    "characterId": "",
+    "characterName": "",
+    "personaId": "",
+    "lastAiMessage": "",
+    "mode": "",
+    "sourceDevice": "",
+    "lastUpdated": 0.0,  # unix timestamp
+}
+state_lock = threading.Lock()
+
+
+# ─── Phase 2 — SSE event bus ──────────────────────────────
+# Each subscriber gets its own bounded queue. Full queues drop events rather
+# than block broadcasters — SSE is best-effort. Typical subscriber: one ST tab.
+EVENT_QUEUE_MAX = 50
+event_subscribers: list["queue.Queue"] = []
+event_subscribers_lock = threading.Lock()
+
+
+def subscribe_events() -> "queue.Queue":
+    q: "queue.Queue" = queue.Queue(maxsize=EVENT_QUEUE_MAX)
+    with event_subscribers_lock:
+        event_subscribers.append(q)
+    return q
+
+
+def unsubscribe_events(q: "queue.Queue") -> None:
+    with event_subscribers_lock:
+        try:
+            event_subscribers.remove(q)
+        except ValueError:
+            pass
+
+
+def broadcast_event(event_type: str, payload: dict) -> int:
+    """Push an event to every live subscriber. Returns # subscribers reached.
+
+    Drops on a per-subscriber basis when that subscriber's queue is full;
+    a slow consumer can't stall others.
+    """
+    msg = (event_type, payload)
+    reached = 0
+    with event_subscribers_lock:
+        subs = list(event_subscribers)
+    for q in subs:
+        try:
+            q.put_nowait(msg)
+            reached += 1
+        except queue.Full:
+            log.warning("SSE subscriber queue full; dropping event %s", event_type)
+    return reached
 
 
 def _new_entry_id() -> str:
@@ -714,6 +797,336 @@ GRAMMAR_CLEAN_SYSTEM = (
     "fix mechanics. Do not add content. Output only the cleaned text."
 )
 
+DISFLUENCY_CLEAN_SYSTEM = (
+    "You are a speech disfluency cleaner. The input is raw speech-to-text from someone "
+    "dictating freely — it contains stutters, filler words (um, uh, like), false starts, "
+    "self-corrections, and repeated phrases where they restarted a sentence.\n\n"
+    "YOUR JOB: Output the cleaned, intended version.\n"
+    "- Remove filler words: um, uh, er, ah, like (when used as filler), you know, I mean, sort of, kind of (when filler)\n"
+    "- Collapse repeated restarts: \"he walks, he walks up\" -> \"he walks up\"\n"
+    "- Resolve self-corrections: \"she's wearing red, no blue\" -> \"she's wearing blue\"\n"
+    "- Fix obviously fragmented sentences caused by speech pauses\n\n"
+    "CRITICAL RULES:\n"
+    "- Do NOT change content, intent, or add new detail\n"
+    "- Do NOT change intensity, tone, vocabulary choices, or explicit language\n"
+    "- Do NOT moralize, soften, sanitize, or censor. If explicit, it stays explicit.\n"
+    "- Do NOT format for roleplay (no asterisks, no quotes added)\n"
+    "- If the input is already clean, return it essentially unchanged\n"
+    "- Output ONLY the cleaned text, nothing else. No preamble, no explanation."
+)
+
+
+def normalize_formatter_provider(provider: str | None) -> str:
+    provider = (provider or DEFAULT_FORMATTER_PROVIDER).strip().lower()
+    return provider if provider in {"claude", "openai"} else DEFAULT_FORMATTER_PROVIDER
+
+
+def formatter_base_url(provider: str) -> str:
+    provider = normalize_formatter_provider(provider)
+    base = OPENAI_PROXY_URL if provider == "openai" else CLAUDE_PROXY_URL
+    base = base.strip().rstrip("/")
+    if provider == "openai" and base.endswith("/v1"):
+        base = base[:-3]
+    return base
+
+
+def formatter_health_url(provider: str) -> str:
+    base = formatter_base_url(provider)
+    if normalize_formatter_provider(provider) == "openai":
+        return f"{base}/v1/models"
+    return f"{base}/health"
+
+
+def formatter_request_url(provider: str, endpoint_override: str = "") -> str:
+    provider = normalize_formatter_provider(provider)
+    base = formatter_base_url(provider)
+    if provider == "openai":
+        return f"{base}/v1/chat/completions"
+    endpoint = endpoint_override or "/v1/messages"
+    return f"{base}{endpoint}"
+
+
+def formatter_model(provider: str, *, cleanup: bool = False) -> str:
+    provider = normalize_formatter_provider(provider)
+    if provider == "openai":
+        return OPENAI_CLEAN_MODEL if cleanup else OPENAI_RP_MODEL
+    return DISFLUENCY_CLEAN_MODEL if cleanup else CLAUDE_RP_MODEL
+
+
+def formatter_payload(
+    provider: str,
+    *,
+    system_prompt: str,
+    user_content: str,
+    model: str,
+    max_tokens: int,
+    temperature: float | None,
+) -> dict:
+    provider = normalize_formatter_provider(provider)
+    if provider == "openai":
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": user_content})
+        payload = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "stream": False,
+        }
+    else:
+        payload = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "stream": False,
+            "system": [{"type": "text", "text": system_prompt}],
+            "messages": [{"role": "user", "content": user_content}],
+        }
+    if temperature is not None:
+        payload["temperature"] = float(temperature)
+    return payload
+
+
+def formatter_response_text(data: dict) -> str:
+    content = data.get("content")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text")
+            if isinstance(text, str) and text.strip():
+                parts.append(text)
+                continue
+            nested = item.get("content")
+            if isinstance(nested, str) and nested.strip():
+                parts.append(nested)
+        if parts:
+            return "\n".join(parts).strip()
+
+    choices = data.get("choices")
+    if isinstance(choices, list) and choices:
+        message = choices[0].get("message", {})
+        if isinstance(message, dict):
+            content = message.get("content", "")
+            if isinstance(content, str):
+                return content.strip()
+            if isinstance(content, list):
+                parts = []
+                for item in content:
+                    if isinstance(item, str):
+                        parts.append(item)
+                    elif isinstance(item, dict):
+                        text = item.get("text") or item.get("content")
+                        if isinstance(text, str) and text.strip():
+                            parts.append(text)
+                if parts:
+                    return "\n".join(parts).strip()
+    return ""
+
+
+def probe_formatter(provider: str, timeout: float = 2.0) -> tuple[bool, str]:
+    try:
+        req = urllib.request.Request(formatter_health_url(provider), method="GET")
+        urllib.request.urlopen(req, timeout=timeout)
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
+def disfluency_clean(text: str, provider: str = DEFAULT_FORMATTER_PROVIDER) -> tuple[str, bool, str]:
+    """Run a cheap-model cleanup pass to remove stutters/fillers/restarts.
+
+    Returns (cleaned_text, was_cleaned, reason_if_skipped).
+    Falls through to the original text on timeout, proxy failure, or oversized input.
+    `was_cleaned` is True when the cleanup actually ran; False on skip/failure.
+    """
+    if not text or not text.strip():
+        return text, False, "empty input"
+
+    word_count = len(text.split())
+    if word_count > DISFLUENCY_CLEAN_MAX_WORDS:
+        return text, False, f"input {word_count} words exceeds cap {DISFLUENCY_CLEAN_MAX_WORDS}"
+
+    provider = normalize_formatter_provider(provider)
+    healthy, _reason = probe_formatter(provider, timeout=1.5)
+    if not healthy:
+        log.info("disfluency_clean: %s formatter unreachable — passing through raw", provider)
+        return text, False, f"cleanup proxy unreachable ({provider})"
+
+    payload = json.dumps(
+        formatter_payload(
+            provider,
+            system_prompt=DISFLUENCY_CLEAN_SYSTEM,
+            user_content=text,
+            model=formatter_model(provider, cleanup=True),
+            max_tokens=max(512, len(text) * 2),
+            temperature=0.0,
+        )
+    ).encode()
+
+    try:
+        req = urllib.request.Request(
+            formatter_request_url(provider),
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=DISFLUENCY_CLEAN_TIMEOUT) as resp:
+            data = json.loads(resp.read())
+        cleaned = formatter_response_text(data)
+        if not cleaned:
+            return text, False, "cleanup returned empty"
+        # Safety: if cleanup output is drastically shorter (<40% of input by word count)
+        # we're likely looking at a truncation or the model dropping content — fall back.
+        if len(cleaned.split()) < max(3, word_count * 0.4):
+            log.warning(
+                "disfluency_clean: output suspiciously short "
+                f"({len(cleaned.split())} words vs {word_count}) — falling back to raw"
+            )
+            return text, False, "cleanup output too short, possible truncation"
+        return cleaned, True, ""
+    except Exception as e:
+        log.info(f"disfluency_clean: failed ({e}) — passing through raw")
+        return text, False, f"cleanup failed: {e}"
+
+
+# ─── Phase 3: Per-character mode memory ──────────────────
+_char_modes_cache: dict = {"data": {}, "mtime": 0.0}
+char_modes_lock = threading.Lock()
+
+
+def _ensure_char_modes_file() -> None:
+    """Seed an empty char-modes file if one doesn't exist yet."""
+    if CHAR_MODES_FILE.exists():
+        return
+    try:
+        _atomic_write(CHAR_MODES_FILE, _serialize_config({}))
+        log.info(f"Seeded empty char-mode memory at {CHAR_MODES_FILE}")
+    except Exception as e:
+        log.warning(f"Could not seed {CHAR_MODES_FILE}: {e}")
+
+
+def load_char_modes() -> dict:
+    """Load the per-character mode memory dict. Cached by mtime."""
+    try:
+        mtime = CHAR_MODES_FILE.stat().st_mtime
+    except FileNotFoundError:
+        _ensure_char_modes_file()
+        try:
+            mtime = CHAR_MODES_FILE.stat().st_mtime
+        except FileNotFoundError:
+            return {}
+
+    with char_modes_lock:
+        if _char_modes_cache["data"] and _char_modes_cache["mtime"] == mtime:
+            return _char_modes_cache["data"]
+        try:
+            raw = CHAR_MODES_FILE.read_bytes()
+            if not raw.strip():
+                data = {}
+            elif _HAVE_YAML:
+                data = yaml.safe_load(raw) or {}
+            else:
+                data = json.loads(raw) if raw.strip() else {}
+            if not isinstance(data, dict):
+                log.warning(
+                    f"{CHAR_MODES_FILE} is not a mapping; resetting in-memory to empty"
+                )
+                data = {}
+        except Exception as e:
+            log.warning(f"Failed to parse {CHAR_MODES_FILE}: {e} — using empty")
+            data = {}
+        _char_modes_cache["data"] = data
+        _char_modes_cache["mtime"] = mtime
+        return data
+
+
+def save_char_mode(character_id: str, mode_id: str) -> dict:
+    """Persist `{character_id: mode_id}` into the char-modes file. Returns full dict."""
+    if not character_id or not mode_id:
+        return load_char_modes()
+    current = dict(load_char_modes())  # copy
+    if current.get(character_id) == mode_id:
+        return current
+    current[character_id] = mode_id
+    try:
+        _atomic_write(CHAR_MODES_FILE, _serialize_config(current))
+    except Exception as e:
+        log.warning(f"Failed to write {CHAR_MODES_FILE}: {e}")
+        return load_char_modes()
+    with char_modes_lock:
+        _char_modes_cache["data"] = current
+        try:
+            _char_modes_cache["mtime"] = CHAR_MODES_FILE.stat().st_mtime
+        except Exception:
+            _char_modes_cache["mtime"] = 0.0
+    return current
+
+
+def get_char_mode(character_id: str) -> str:
+    """Return the remembered mode id for a character, or empty string."""
+    if not character_id:
+        return ""
+    return load_char_modes().get(character_id, "")
+
+
+# ─── Phase 3: ST state helpers ───────────────────────────
+def state_freshness(last_updated: float) -> str:
+    """Return 'fresh' / 'stale' / 'dead' based on TTL thresholds."""
+    if last_updated <= 0:
+        return "dead"
+    age = time.time() - last_updated
+    if age < STATE_FRESH_SECONDS:
+        return "fresh"
+    if age < STATE_STALE_SECONDS:
+        return "stale"
+    return "dead"
+
+
+def snapshot_state() -> dict:
+    """Thread-safe snapshot of current ST state with computed freshness fields."""
+    with state_lock:
+        snap = dict(st_state)
+    fresh = state_freshness(snap.get("lastUpdated", 0.0))
+    snap["freshness"] = fresh
+    snap["fresh"] = (fresh == "fresh")
+    age = time.time() - snap.get("lastUpdated", 0.0) if snap.get("lastUpdated", 0.0) > 0 else None
+    snap["ageSeconds"] = round(age, 1) if age is not None else None
+    # Inject per-character remembered mode as a hint the UI can adopt if `mode` is empty.
+    if not snap.get("mode") and snap.get("characterId"):
+        remembered = get_char_mode(snap["characterId"])
+        if remembered:
+            snap["rememberedMode"] = remembered
+    return snap
+
+
+def update_state(payload: dict) -> dict:
+    """Merge incoming ST state payload. Returns snapshot after merge."""
+    allowed_keys = {
+        "chatId", "chatType", "characterId", "characterName",
+        "personaId", "lastAiMessage", "mode", "sourceDevice",
+    }
+    with state_lock:
+        for k in allowed_keys:
+            if k in payload:
+                val = payload[k]
+                # coerce to string for simple fields; lastAiMessage gets truncated
+                if k == "lastAiMessage" and isinstance(val, str):
+                    # cap to 4000 chars so phone UI receives a reasonable blob
+                    st_state[k] = val[:4000]
+                elif val is None:
+                    st_state[k] = ""
+                else:
+                    st_state[k] = str(val)
+        st_state["lastUpdated"] = time.time()
+    return snapshot_state()
+
 
 def format_rp(text: str, mode: int = 1, context: str = "",
                persona_id: str = "", use_rules: bool = False,
@@ -723,8 +1136,9 @@ def format_rp(text: str, mode: int = 1, context: str = "",
                endpoint_override: str = "",
                skip_persona_character: bool = False,
                user_content_override: str = "",
-               temperature: float | None = None) -> tuple[str, bool, str]:
-    """Format text via claude-code-proxy. Backwards-compatible legacy interface.
+               temperature: float | None = None,
+               provider: str = DEFAULT_FORMATTER_PROVIDER) -> tuple[str, bool, str]:
+    """Format text via the selected formatter proxy. Backwards-compatible legacy interface.
 
     mode=1 format, mode=2 enhance.
     system_prompt_override / endpoint_override let pipeline steps reuse the same
@@ -736,13 +1150,11 @@ def format_rp(text: str, mode: int = 1, context: str = "",
     Returns (formatted_text, formatting_skipped, reason).
     On skip/failure, formatted_text is the raw input and reason explains why.
     """
-    # Check proxy health
-    try:
-        req = urllib.request.Request(f"{PROXY_URL}/health", method="GET")
-        urllib.request.urlopen(req, timeout=2)
-    except Exception:
-        log.warning("claude-code-proxy not reachable — returning raw text")
-        return text, True, "RP proxy offline (claude-code-proxy not reachable)"
+    provider = normalize_formatter_provider(provider)
+    healthy, _reason = probe_formatter(provider, timeout=2)
+    if not healthy:
+        log.warning("%s formatter proxy not reachable — returning raw text", provider)
+        return text, True, f"RP proxy offline ({provider} formatter not reachable)"
 
     if system_prompt_override:
         system_prompt = system_prompt_override
@@ -805,27 +1217,26 @@ def format_rp(text: str, mode: int = 1, context: str = "",
 
         user_content += f"[YOUR DICTATED INPUT — rewrite ONLY this, in the persona's voice, addressing the character above:]\n{text}"
 
-    payload_obj: dict = {
-        "model": RP_MODEL,
-        "max_tokens": 4096,
-        "stream": False,
-        "system": [{"type": "text", "text": system_prompt}],
-        "messages": [{"role": "user", "content": user_content}],
-    }
-    if temperature is not None:
-        payload_obj["temperature"] = float(temperature)
+    payload_obj = formatter_payload(
+        provider,
+        system_prompt=system_prompt,
+        user_content=user_content,
+        model=formatter_model(provider),
+        max_tokens=4096,
+        temperature=temperature,
+    )
     payload = json.dumps(payload_obj).encode()
 
     try:
         req = urllib.request.Request(
-            f"{PROXY_URL}{endpoint}",
+            formatter_request_url(provider, endpoint),
             data=payload,
             headers={"Content-Type": "application/json"},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=60) as resp:
             data = json.loads(resp.read())
-        formatted = data.get("content", [{}])[0].get("text", "")
+        formatted = formatter_response_text(data)
         # Strip pyrite thinking tags
         formatted = re.sub(r"<thinking>.*?</thinking>", "", formatted, flags=re.DOTALL)
         formatted = formatted.strip()
@@ -886,7 +1297,7 @@ DEFAULT_MODES: list[dict] = [
         "label": "RP+",
         "icon": "sparkles",
         "whisper_model": DEFAULT_MODEL,
-        "pipeline": ["whisper", "vocab_correct", "rp_enhance"],
+        "pipeline": ["whisper", "vocab_correct", "disfluency_clean", "rp_enhance"],
         "system_prompt": "",  # empty → use built-in RP_SYSTEM_ENHANCE
         "temperature": 0.7,
         "preset": "pyrite",
@@ -900,7 +1311,7 @@ DEFAULT_MODES: list[dict] = [
         "label": "Persona POV",
         "icon": "user",
         "whisper_model": DEFAULT_MODEL,
-        "pipeline": ["whisper", "vocab_correct", "persona_pov"],
+        "pipeline": ["whisper", "vocab_correct", "disfluency_clean", "persona_pov"],
         "system_prompt": "",  # built dynamically from persona + character
         "temperature": 0.7,
         "preset": "pyrite",
@@ -1232,24 +1643,38 @@ def run_pipeline(text: str, mode: dict,
                  character_id: str = "",
                  chat_context: str = "",
                  use_rules: bool = False,
-                 prose_format: bool = False) -> tuple[str, bool, str]:
-    """Run the pipeline steps of `mode` over `text`. Returns (text, skipped, reason).
+                 prose_format: bool = False,
+                 provider: str = DEFAULT_FORMATTER_PROVIDER) -> tuple[str, bool, str, str]:
+    """Run the pipeline steps of `mode` over `text`.
 
+    Returns (text, skipped, reason, cleaned_text).
     `skipped` signals that the LLM-polish stage did not happen (frontend shows toast);
-    vocab_correct is a pre-processor and does not count as "skipping".
+    vocab_correct and disfluency_clean are pre-processors and do not count as "skipping".
+    `cleaned_text` is the post-disfluency-clean intermediate (empty string if cleanup
+    was not part of the pipeline, skipped, or passed through unchanged).
     """
     pipeline = [step for step in mode.get("pipeline", []) if step != "whisper"]
     if not pipeline:
         # Plain mode
-        return text, False, ""
+        return text, False, "", ""
 
     out = text
+    provider = normalize_formatter_provider(provider)
+    cleaned_text = ""
     formatting_skipped = False
     formatting_reason = ""
 
     for step in pipeline:
         if step == "vocab_correct":
             out = vocab_correct(out, character_id=character_id)
+            continue
+
+        if step == "disfluency_clean":
+            cleaned, was_cleaned, reason = disfluency_clean(out, provider=provider)
+            if was_cleaned and cleaned != out:
+                cleaned_text = cleaned
+                out = cleaned
+            # Non-blocking: failures here never abort the pipeline; just pass through.
             continue
 
         if step == "grammar_clean":
@@ -1263,6 +1688,7 @@ def run_pipeline(text: str, mode: dict,
                 skip_persona_character=True,
                 user_content_override=user_content,
                 temperature=mode.get("temperature"),
+                provider=provider,
             )
             if skipped:
                 formatting_skipped = True
@@ -1281,6 +1707,7 @@ def run_pipeline(text: str, mode: dict,
                 system_prompt_override=system,
                 endpoint_override="/v1/messages",
                 temperature=mode.get("temperature"),
+                provider=provider,
             )
             if skipped:
                 formatting_skipped = True
@@ -1300,6 +1727,7 @@ def run_pipeline(text: str, mode: dict,
                 system_prompt_override=system,
                 endpoint_override=endpoint,
                 temperature=mode.get("temperature"),
+                provider=provider,
             )
             if skipped:
                 formatting_skipped = True
@@ -1321,6 +1749,7 @@ def run_pipeline(text: str, mode: dict,
                     character_id=character_id,
                     chat_context=chat_context,
                     temperature=mode.get("temperature"),
+                    provider=provider,
                 )
                 fb_reason = "persona_pov requires both persona and character; fell back to rp_enhance"
                 if skipped:
@@ -1344,6 +1773,7 @@ def run_pipeline(text: str, mode: dict,
                 skip_persona_character=True,
                 user_content_override=user_content,
                 temperature=mode.get("temperature"),
+                provider=provider,
             )
             if skipped:
                 formatting_skipped = True
@@ -1352,7 +1782,7 @@ def run_pipeline(text: str, mode: dict,
 
         log.warning(f"Unknown pipeline step '{step}' — skipping")
 
-    return out, formatting_skipped, formatting_reason
+    return out, formatting_skipped, formatting_reason, cleaned_text
 
 
 # ─── Web UI ───────────────────────────────────────────────
@@ -1651,6 +2081,9 @@ WEB_UI = r"""<!DOCTYPE html>
   }
   .record-btn.recording svg { fill: var(--recording); }
   .record-btn.processing svg { fill: var(--text-dim); }
+  /* Phase 2.5A: subtle scale while hold-to-record is engaged so the user
+     feels the press is registered. Combines with .recording's pulse. */
+  .record-btn.holding { transform: scale(0.95); box-shadow: 0 0 0 4px rgba(196, 167, 231, 0.35); }
 
   @keyframes pulse {
     0%, 100% { box-shadow: 0 0 0 0 rgba(235, 111, 146, 0.3); }
@@ -1779,6 +2212,144 @@ WEB_UI = r"""<!DOCTYPE html>
   }
   .cert-banner.show { display: block; }
   .cert-banner.urgent { border-left-color: var(--error); }
+
+  /* Phase 1: ST follow banner — signals phone is tracking ST's current context. */
+  .st-follow-banner {
+    margin: 8px 16px 0;
+    padding: 8px 14px;
+    border-radius: var(--radius-sm);
+    background: var(--surface-high);
+    color: var(--text);
+    font-size: 13px;
+    border-left: 3px solid var(--primary);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  .st-follow-banner.fresh { border-left-color: var(--primary); }
+  .st-follow-banner.stale { border-left-color: #e6a756; color: var(--text-dim); }
+  .st-follow-banner.override { border-left-color: #7a7a9a; }
+  .st-follow-main { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
+  .st-follow-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .st-follow-icon { flex-shrink: 0; }
+  .st-follow-btn {
+    background: var(--primary);
+    color: #121218;
+    border: none;
+    padding: 5px 12px;
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .st-follow-btn:hover { filter: brightness(1.1); }
+
+  /* Phase 2.5C: last-result pill.
+     Sticky so it stays visible as the user scrolls down through mode chips
+     and the result area — the whole point is quick re-copy/re-send without
+     hunting for it. Z-index above the record button area. */
+  .last-result-pill {
+    position: sticky;
+    top: 8px;
+    z-index: 20;
+    margin: 8px 16px 0;
+    padding: 8px 10px 8px 12px;
+    border-radius: 999px;
+    background: var(--surface-high);
+    border: 1px solid var(--primary);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text-dim);
+    overflow: hidden;
+  }
+  .last-result-pill::before {
+    /* TTL progress bar — animated width controlled by inline style */
+    content: "";
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: var(--ttl-pct, 100%);
+    background: linear-gradient(90deg, rgba(196,167,231,0.18), rgba(196,167,231,0));
+    pointer-events: none;
+    transition: width 1s linear;
+  }
+  .pill-preview {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: pointer;
+    color: var(--text);
+    position: relative;
+    z-index: 1;
+  }
+  .pill-preview:hover { color: var(--primary); }
+  .pill-actions { display: flex; gap: 4px; flex-shrink: 0; position: relative; z-index: 1; }
+  .pill-btn {
+    background: transparent;
+    border: none;
+    padding: 4px 6px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    color: var(--text-dim);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .pill-btn:hover { background: rgba(255,255,255,0.06); color: var(--text); }
+  .pill-btn svg { width: 14px; height: 14px; }
+  .pill-btn.pill-close:hover { color: var(--error); }
+  .pill-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .pill-btn:disabled:hover { background: transparent; color: var(--text-dim); }
+
+  @keyframes pillSlideIn {
+    from { transform: translateY(-8px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+  }
+  .last-result-pill.entering { animation: pillSlideIn 0.25s ease-out; }
+
+  /* Phase 1: result-view accordion rows (Raw / Cleaned / Formatted). */
+  .result-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 8px;
+  }
+  .result-row {
+    border: 1px solid var(--surface-high);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+  }
+  .result-row-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 10px;
+    background: var(--surface-high);
+    font-size: 12px;
+    color: var(--text-dim);
+    cursor: pointer;
+    user-select: none;
+  }
+  .result-row-head .label { font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; font-size: 11px; }
+  .result-row-head .eye { opacity: 0.7; }
+  .result-row-body {
+    display: none;
+    padding: 8px 10px;
+    font-size: 13px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--text-dim);
+    max-height: 200px;
+    overflow-y: auto;
+  }
+  .result-row.open .result-row-body { display: block; }
+  .result-row.open .result-row-head .eye { opacity: 1; }
 
   .error-text { color: var(--error); font-size: 14px; text-align: center; }
 
@@ -2259,7 +2830,39 @@ WEB_UI = r"""<!DOCTYPE html>
 
 <div class="cert-banner" id="certBanner" role="status" aria-live="polite"></div>
 
+<!-- Phase 1: ST follow banner. Hidden by default; shown once /state is fetched. -->
+<div class="st-follow-banner" id="stFollowBanner" style="display:none" role="status" aria-live="polite">
+  <div class="st-follow-main">
+    <span class="st-follow-icon" id="stFollowIcon">📡</span>
+    <span class="st-follow-text" id="stFollowText">Following ST</span>
+  </div>
+  <div class="st-follow-actions">
+    <button class="st-follow-btn" id="stResyncBtn" onclick="resyncWithST()" style="display:none">Re-sync</button>
+  </div>
+</div>
+
+<!-- Phase 2.5C: last-result pill. Persistent for 60s after a successful take,
+     giving quick re-copy / re-send access even after you keep dictating. -->
+<div class="last-result-pill" id="lastResultPill" style="display:none" role="status" aria-live="polite">
+  <span class="pill-preview" id="pillPreview" onclick="expandLastResult()" title="Tap to restore to editor">…</span>
+  <div class="pill-actions">
+    <button class="pill-btn" id="pillCopyBtn" onclick="pillCopy()" title="Re-copy">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+    </button>
+    <button class="pill-btn" id="pillSendBtn" onclick="pillSend()" title="Re-send to ST">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+    </button>
+    <button class="pill-btn pill-close" onclick="dismissLastResult()" title="Dismiss">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+    </button>
+  </div>
+</div>
+
 <div class="controls">
+  <select class="chip" id="providerSelect" onchange="setProvider(this.value)">
+    <option value="claude">Claude</option>
+    <option value="openai">OpenAI</option>
+  </select>
   <select class="chip" id="modelSelect">
     <option value="large-v3-turbo">Large Turbo</option>
     <option value="medium">Medium</option>
@@ -2281,7 +2884,7 @@ WEB_UI = r"""<!DOCTYPE html>
          max-height:240px;overflow-y:auto;z-index:50;margin-top:4px;box-shadow:0 8px 24px rgba(0,0,0,0.4)">
     </div>
   </div>
-  <select class="chip" id="personaSelect" onchange="selectedPersona=this.value">
+  <select class="chip" id="personaSelect" onchange="onPersonaChange(this.value)">
     <option value="none">No Persona</option>
   </select>
   <div class="chip" id="rulesChip" onclick="toggleRules()">Rules</div>
@@ -2339,10 +2942,26 @@ WEB_UI = r"""<!DOCTYPE html>
 
   <canvas class="vu-meter" id="vuMeter" width="160" height="32" aria-hidden="true"></canvas>
 
-  <div class="record-label" id="recordLabel">Tap to record</div>
+  <div class="record-label" id="recordLabel">Tap or hold to record</div>
   <div class="record-sub" id="recordSub"></div>
 
   <div class="result-area" id="resultArea">
+    <div class="result-rows" id="resultRows" style="display:none">
+      <div class="result-row" id="rowRaw">
+        <div class="result-row-head" onclick="toggleResultRow('rowRaw')">
+          <span class="label">Raw</span>
+          <span class="eye">👁</span>
+        </div>
+        <div class="result-row-body" id="rowRawBody"></div>
+      </div>
+      <div class="result-row" id="rowCleaned">
+        <div class="result-row-head" onclick="toggleResultRow('rowCleaned')">
+          <span class="label">Cleaned</span>
+          <span class="eye">👁</span>
+        </div>
+        <div class="result-row-body" id="rowCleanedBody"></div>
+      </div>
+    </div>
     <textarea class="result-box" id="resultText" rows="6" spellcheck="true" placeholder="Transcription appears here. Edit it, then copy."></textarea>
     <div class="result-actions">
       <button class="btn" onclick="clearResult()">
@@ -2353,10 +2972,20 @@ WEB_UI = r"""<!DOCTYPE html>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
         Regen
       </button>
-      <button class="btn primary" onclick="copyResult()">
+      <button class="btn" id="copyBtn" onclick="copyResult()">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
         Copy
       </button>
+      <button class="btn primary" id="sendToStBtn" onclick="sendToST()" title="Send directly to SillyTavern">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+        Send to ST
+      </button>
+    </div>
+    <div class="result-actions-sub" id="resultActionsSub" style="margin-top:6px;display:flex;justify-content:flex-end;align-items:center;gap:8px;font-size:12px;color:var(--text-dim)">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none">
+        <input type="checkbox" id="autoSendToggle" onchange="toggleAutoSend(this.checked)" style="cursor:pointer">
+        <span>Auto-send in ST</span>
+      </label>
     </div>
   </div>
 </div>
@@ -2422,6 +3051,10 @@ WEB_UI = r"""<!DOCTYPE html>
     </span>
   </div>
   <div class="log-body" id="logBody">
+    <div id="logFilterStrip" style="display:none; padding:6px 10px; font-size:12px; color:var(--text-dim); border-bottom:1px solid var(--surface-high)">
+      <span id="logFilterText">Filtered to current chat</span>
+      <a href="#" onclick="event.preventDefault(); toggleChatFilter()" style="color:var(--primary); margin-left:6px" id="logFilterToggle">view all</a>
+    </div>
     <div class="log-empty" id="logEmpty">No entries yet. Dictate something with RP+ to start building context.</div>
     <div id="logEntries"></div>
   </div>
@@ -2435,6 +3068,7 @@ let audioChunks = [];
 let recording = false;
 let rpMode = 0;                // derived legacy numeric mode (kept for any lingering callers)
 let currentMode = '';          // active mode id (e.g. 'rp_enhance')
+let currentProvider = 'claude';
 let lastUsedMode = '';         // mode id used for last transcription
 let availableModes = [];       // [{id, label, icon, whisper_model, preset, use_persona, use_character, use_chat_context, pipeline}, ...]
 let durationInterval = null;
@@ -2448,6 +3082,25 @@ let proseFormat = false;
 let chatSource = 'manual';     // 'manual', 'auto', or 'individual:<name>' or 'group:<name>'
 let chatContextText = '';      // assembled context string from chat history
 let recentChats = [];
+
+// Phase 1: ST state following
+let stState = null;            // last /state snapshot from server
+let stStateFresh = false;      // whether ST state is currently fresh
+let stFollow = true;           // auto-adopt ST state; user override sets this false
+let statePollTimer = null;     // poll /state every STATE_POLL_MS when visible
+let statePollVisible = true;
+const STATE_POLL_MS = 10_000;
+const FOLLOW_ST_FROM_URL = new URLSearchParams(location.search).get('follow') !== '0';
+
+// Phase 2: Send-to-ST direct inject
+let autoSendToST = localStorage.getItem('dictation.autoSend') === '1';
+
+// Phase 2.5C: last-result pill
+const PILL_TTL_MS = 60_000;
+const PILL_PREVIEW_MAX = 60;
+let lastResult = null;         // { text, raw, cleaned, mode, expiresAt }
+let pillTimer = null;
+let pillTickTimer = null;
 
 // Embed mode (ST extension iframe)
 const isEmbed = document.querySelector('meta[name="dictation-embed"]')?.content === '1';
@@ -2479,6 +3132,7 @@ const MODE_TO_RP = {
 const btn = document.getElementById('recordBtn');
 const label = document.getElementById('recordLabel');
 const recordSub = document.getElementById('recordSub');
+const providerSelect = document.getElementById('providerSelect');
 const resultArea = document.getElementById('resultArea');
 const resultText = document.getElementById('resultText');
 const durationEl = document.getElementById('duration');
@@ -2502,6 +3156,20 @@ function iconSvg(name) {
   return `<svg class="chip-icon" viewBox="0 0 24 24" aria-hidden="true">${paths}</svg>`;
 }
 
+function normalizeProvider(provider) {
+  provider = String(provider || '').toLowerCase();
+  return provider === 'openai' ? 'openai' : 'claude';
+}
+
+function setProvider(provider, opts) {
+  opts = opts || {};
+  currentProvider = normalizeProvider(provider);
+  if (providerSelect) providerSelect.value = currentProvider;
+  if (opts.persist !== false) {
+    try { localStorage.setItem('dictation.provider', currentProvider); } catch {}
+  }
+}
+
 // ─── Mode chips ─────────────────────────────────────────
 async function loadModes() {
   try {
@@ -2522,6 +3190,9 @@ async function loadModes() {
   }
 
   renderModeChips();
+
+  const storedProvider = localStorage.getItem('dictation.provider') || '';
+  setProvider(embedConfig.provider || storedProvider || 'claude', { persist: false });
 
   // Resolve initial mode: embed config → localStorage → rp_enhance → first.
   const stored = localStorage.getItem('dictation.mode') || '';
@@ -2565,6 +3236,7 @@ function getMode(id) {
 
 function setMode(id, opts) {
   opts = opts || {};
+  const prev = currentMode;
   let mode = getMode(id);
   if (!mode) {
     // Unknown mode → fall back to rp_enhance, then first.
@@ -2593,6 +3265,17 @@ function setMode(id, opts) {
   // Toggle chat-source section based on mode.
   const chatSourceSection = document.getElementById('chatSourceSection');
   chatSourceSection.style.display = mode.use_chat_context ? '' : 'none';
+
+  // Phase 1: if this is a user-driven mode change (not silent) and we have a fresh
+  // ST character, persist the char→mode mapping. Also update the follow banner.
+  if (!opts.silent && prev && prev !== id) {
+    if (stStateFresh && stState && stState.characterId) {
+      persistCharMode(stState.characterId, id);
+    }
+    renderFollowBanner();
+  } else if (opts.silent) {
+    renderFollowBanner();
+  }
 }
 
 // ─── Raw badge (formatting_skipped indicator) ───────────
@@ -2683,7 +3366,18 @@ function filterCharacters() {
   dropdown.style.display = 'block';
 }
 
+function onPersonaChange(val) {
+  if (stStateFresh && stState && val && val !== stState.personaId) {
+    markOverride('persona');
+  }
+  selectedPersona = val;
+}
+
 function selectCharacter(id, name) {
+  // Phase 1: if user picks a character that differs from fresh ST state, mark override.
+  if (stStateFresh && stState && id !== 'none' && id !== stState.characterId) {
+    markOverride('character');
+  }
   selectedCharacter = id;
   document.getElementById('characterSearch').value = (id === 'none') ? '' : name;
   document.getElementById('characterValue').value = id;
@@ -2862,6 +3556,109 @@ async function toggleRecord() {
     await startRecording();
   }
 }
+
+// Phase 2.5A: hold-to-record.
+// Start recording IMMEDIATELY on touchstart (preserves user-gesture context
+// for getUserMedia — delaying via setTimeout loses permission on mobile).
+// Then on touchend decide: short press = "tap" (leave recording on, wait for
+// next tap to stop) / long press = "hold" (stop now on release).
+//
+// Desktop mouse: ignored here, click handler uses toggleRecord() as before.
+const HOLD_THRESHOLD_MS = 350;
+let touchStartTs = 0;
+let touchActive = false;       // a touch-initiated recording is in flight
+let touchRecordingStarted = false;  // did this touch actually trigger startRecording()
+let suppressNextClick = false; // block the synthetic click after a hold release
+
+async function onRecordTouchStart(ev) {
+  // Only single-finger touches.
+  if (ev.touches.length > 1) return;
+  // If already recording from a previous tap, treat this touch as a stop gesture.
+  if (recording) {
+    touchActive = true;
+    touchRecordingStarted = false;  // we did NOT start recording this touch
+    touchStartTs = Date.now();
+    return;
+  }
+  touchActive = true;
+  touchStartTs = Date.now();
+  btn.classList.add('holding');
+  // Haptic hint so user knows the press registered.
+  if (navigator.vibrate) { try { navigator.vibrate(15); } catch {} }
+  // Start recording now — synchronous start of the async flow keeps us in
+  // user-gesture context so getUserMedia's permission prompt works.
+  try {
+    await startRecording();
+    touchRecordingStarted = true;
+  } catch (e) {
+    touchRecordingStarted = false;
+    btn.classList.remove('holding');
+    WARN_UI('startRecording failed', e);
+  }
+}
+
+function onRecordTouchEnd(ev) {
+  if (!touchActive) return;
+  const heldMs = Date.now() - touchStartTs;
+  touchActive = false;
+  btn.classList.remove('holding');
+  // Suppress the synthetic click that browsers fire after touchend.
+  suppressNextClick = true;
+  // Clear the suppress flag on the next tick in case no click arrives.
+  setTimeout(() => { suppressNextClick = false; }, 400);
+
+  if (heldMs >= HOLD_THRESHOLD_MS) {
+    // Hold gesture → stop recording now.
+    if (recording) stopRecording();
+    try { ev.preventDefault(); } catch {}
+  } else {
+    // Short tap.
+    if (touchRecordingStarted) {
+      // We just started on touchstart — leave it running, user will tap to stop.
+      // (Existing tap-to-stop behavior.)
+    } else {
+      // We were already recording (this touch was intended as a tap-to-stop).
+      if (recording) stopRecording();
+      try { ev.preventDefault(); } catch {}
+    }
+  }
+}
+
+function onRecordTouchCancel() {
+  if (!touchActive) return;
+  touchActive = false;
+  btn.classList.remove('holding');
+  // A cancel usually means scroll hijack — stop recording to avoid leaving mic hot.
+  if (recording && touchRecordingStarted) stopRecording();
+}
+
+function onRecordClick(ev) {
+  // Swallow the synthetic click that fires after any touch sequence we handled.
+  if (suppressNextClick) {
+    suppressNextClick = false;
+    ev.preventDefault();
+    ev.stopPropagation();
+    return;
+  }
+  // Mouse/keyboard path: plain toggle.
+  toggleRecord();
+}
+
+// Helper: warn without crashing if the console is absent (it isn't in reality,
+// but keeps lint-passes quiet about unused WARN_UI).
+function WARN_UI(...args) { try { console.warn('[dictation]', ...args); } catch {} }
+
+(function wireHoldToRecord() {
+  if (!btn) return;
+  // Strip the inline onclick so our gated click handler is the only click path.
+  btn.removeAttribute('onclick');
+  btn.addEventListener('click', onRecordClick);
+  // touchstart must NOT be passive — we need to preventDefault() if we want
+  // to suppress the synthetic mousedown-click chain on some browsers.
+  btn.addEventListener('touchstart', onRecordTouchStart, { passive: false });
+  btn.addEventListener('touchend', onRecordTouchEnd);
+  btn.addEventListener('touchcancel', onRecordTouchCancel, { passive: true });
+})();
 
 async function startRecording() {
   try {
@@ -3073,6 +3870,7 @@ async function sendAudio() {
   const context = getContext();
   const mode = getMode(currentMode);
   const params = new URLSearchParams({ model });
+  params.set('provider', currentProvider);
   if (currentMode) params.set('mode', currentMode);
   if (context) params.set('context', context);
 
@@ -3104,7 +3902,8 @@ async function sendAudio() {
       lastRawText = data.raw || data.text;
       // Backend echoes the resolved mode id; fall back if missing.
       lastUsedMode = data.mode || currentMode;
-      showResult(data.text, { raw: lastRawText, mode: lastUsedMode,
+      showResult(data.text, { raw: lastRawText, cleaned: data.cleaned || '',
+                              mode: lastUsedMode,
                               formatting_skipped: !!data.formatting_skipped,
                               formatting_reason: data.formatting_reason || '' });
 
@@ -3152,6 +3951,7 @@ async function regenerate() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         text: lastRawText,
+        provider: currentProvider,
         mode: regenMode,
         context: context,
         chat_source: chatSource !== 'manual' ? chatSource : '',
@@ -3195,6 +3995,32 @@ function showResult(text, meta) {
   resultText.value = text;
   resultArea.classList.add('visible');
   label.textContent = 'Tap to record';
+
+  // Phase 1: populate Raw / Cleaned accordion rows when different from formatted text.
+  const rows = document.getElementById('resultRows');
+  const rawBody = document.getElementById('rowRawBody');
+  const cleanedBody = document.getElementById('rowCleanedBody');
+  const rowRaw = document.getElementById('rowRaw');
+  const rowCleaned = document.getElementById('rowCleaned');
+  const hasRaw = meta && meta.raw && meta.raw !== text;
+  const hasCleaned = meta && meta.cleaned && meta.cleaned !== text && meta.cleaned !== meta.raw;
+  if (rows) {
+    if (hasRaw || hasCleaned) {
+      rows.style.display = '';
+      if (rowRaw) rowRaw.style.display = hasRaw ? '' : 'none';
+      if (rowCleaned) rowCleaned.style.display = hasCleaned ? '' : 'none';
+      if (rawBody && hasRaw) rawBody.textContent = meta.raw;
+      if (cleanedBody && hasCleaned) cleanedBody.textContent = meta.cleaned;
+      // Start collapsed
+      if (rowRaw) rowRaw.classList.remove('open');
+      if (rowCleaned) rowCleaned.classList.remove('open');
+    } else {
+      rows.style.display = 'none';
+    }
+  }
+
+  // Phase 2.5C: start the last-result pill (lives 60s independently of result area).
+  showLastResultPill(text, meta);
 
   // Auto-copy (clipboard)
   navigator.clipboard.writeText(text)
@@ -3250,6 +4076,8 @@ function clearResult() {
   durationEl.textContent = '0:00';
   regenBtn.style.display = 'none';
   lastRawText = '';
+  const rows = document.getElementById('resultRows');
+  if (rows) rows.style.display = 'none';
 }
 
 // ─── Session log ──────────────────────────────────────
@@ -3293,7 +4121,32 @@ function renderLog() {
 
   empty.style.display = 'none';
   const filterStarred = localStorage.getItem('dictation.log.filterStarred') === '1';
-  const displayed = filterStarred ? sessionLog.filter(e => e.starred) : sessionLog;
+  const filterChatActive = !!(stStateFresh && stState && stState.chatId
+                              && localStorage.getItem('dictation.log.filterChat') !== '0');
+  const currentChatId = filterChatActive ? stState.chatId : null;
+
+  // Phase 1: show/hide the "filtered to current chat" strip.
+  const strip = document.getElementById('logFilterStrip');
+  const stripToggle = document.getElementById('logFilterToggle');
+  const stripText = document.getElementById('logFilterText');
+  if (strip && stripToggle && stripText) {
+    if (stStateFresh && stState && stState.chatId) {
+      strip.style.display = '';
+      if (currentChatId) {
+        stripText.textContent = `Filtered to current chat (${stState.characterName || 'ST'})`;
+        stripToggle.textContent = 'view all';
+      } else {
+        stripText.textContent = 'Showing all chats';
+        stripToggle.textContent = 'filter to current';
+      }
+    } else {
+      strip.style.display = 'none';
+    }
+  }
+
+  let displayed = sessionLog;
+  if (filterStarred) displayed = displayed.filter(e => e.starred);
+  if (currentChatId) displayed = displayed.filter(e => !e.chat_id || e.chat_id === currentChatId);
 
   entries.innerHTML = displayed.map(e => {
     const isUser = e.role === 'user';
@@ -3472,6 +4325,14 @@ function toggleStarFilter() {
   localStorage.setItem('dictation.log.filterStarred', active ? '0' : '1');
   const btn = document.getElementById('starFilterBtn');
   if (btn) btn.style.color = active ? '' : 'var(--primary)';
+  renderLog();
+}
+
+function toggleChatFilter() {
+  // Default is filter ON when state fresh. Flipping stores '0' (disable).
+  const cur = localStorage.getItem('dictation.log.filterChat');
+  if (cur === '0') localStorage.removeItem('dictation.log.filterChat');
+  else localStorage.setItem('dictation.log.filterChat', '0');
   renderLog();
 }
 
@@ -3729,6 +4590,329 @@ async function checkCertHealth() {
 }
 
 // ─── Init ───────────────────────────────────────────────
+// ─── Phase 1: ST state following ──────────────────────
+function ageHuman(seconds) {
+  if (!seconds && seconds !== 0) return '?';
+  if (seconds < 60) return `${Math.round(seconds)}s ago`;
+  if (seconds < 3600) return `${Math.round(seconds/60)}m ago`;
+  return `${Math.round(seconds/3600)}h ago`;
+}
+
+function renderFollowBanner() {
+  // Keep Send-to-ST button enable state in sync with ST connection status.
+  updateSendToStButton();
+  updatePillActions();
+  const el = document.getElementById('stFollowBanner');
+  const icon = document.getElementById('stFollowIcon');
+  const text = document.getElementById('stFollowText');
+  const resync = document.getElementById('stResyncBtn');
+  if (!el) return;
+  el.style.display = '';
+  el.classList.remove('fresh', 'stale', 'override');
+
+  if (!stState || !stState.lastUpdated) {
+    el.classList.add('stale');
+    icon.textContent = '⚠';
+    text.textContent = 'ST not connected — manual mode';
+    resync.style.display = 'none';
+    return;
+  }
+  if (!stFollow) {
+    el.classList.add('override');
+    icon.textContent = '✋';
+    const parts = [];
+    if (stState.characterName) parts.push(stState.characterName);
+    if (stState.mode || currentMode) parts.push(currentMode || stState.mode);
+    text.textContent = `Override — ${parts.join(' • ') || 'manual'}`;
+    resync.style.display = '';
+    resync.textContent = 'Re-sync';
+    return;
+  }
+  if (stStateFresh) {
+    el.classList.add('fresh');
+    icon.textContent = '📡';
+    const parts = [];
+    if (stState.characterName) parts.push(stState.characterName);
+    else if (stState.characterId) parts.push(stState.characterId);
+    if (currentMode) {
+      const m = getMode(currentMode);
+      parts.push(m?.label || currentMode);
+    }
+    text.textContent = `Following ST — ${parts.join(' • ') || '…'}`;
+    resync.style.display = 'none';
+  } else {
+    el.classList.add('stale');
+    icon.textContent = '⚠';
+    text.textContent = `ST stale (${ageHuman(stState.ageSeconds)}) — manual mode`;
+    resync.style.display = '';
+    resync.textContent = 'Re-check';
+  }
+}
+
+async function fetchState() {
+  try {
+    const r = await fetch('/state', { cache: 'no-store' });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
+}
+
+async function applyStateIfFresh(snap, { force = false } = {}) {
+  // Only auto-adopt if following and data is fresh (or forced by manual re-sync).
+  if (!snap) return false;
+  const canAdopt = force || (stFollow && snap.fresh);
+  if (!canAdopt) return false;
+
+  // Character
+  if (snap.characterId) {
+    const charEl = document.getElementById('characterValue');
+    const searchEl = document.getElementById('characterSearch');
+    if (charEl && charEl.value !== snap.characterId) {
+      charEl.value = snap.characterId;
+      selectedCharacter = snap.characterId;
+      if (searchEl) searchEl.value = snap.characterName || snap.characterId;
+    }
+  }
+  // Persona
+  if (snap.personaId) {
+    const pEl = document.getElementById('personaSelect');
+    if (pEl && pEl.value !== snap.personaId) {
+      // Only set if option exists; otherwise ignore (persona file may not be loaded)
+      const opt = Array.from(pEl.options).find(o => o.value === snap.personaId);
+      if (opt) { pEl.value = snap.personaId; selectedPersona = snap.personaId; }
+    }
+  }
+  // Chat context — adopt last AI message if chatSource is manual (don't clobber user-picked chats)
+  if (snap.lastAiMessage && chatSource === 'manual') {
+    const ci = document.getElementById('contextInput');
+    if (ci && !ci.value.trim()) ci.value = snap.lastAiMessage;
+  }
+  // Mode — prefer remembered per-char mode, else snap.mode
+  const preferredMode = snap.rememberedMode || snap.mode;
+  if (preferredMode && preferredMode !== currentMode && getMode(preferredMode)) {
+    setMode(preferredMode, { silent: true });
+  }
+  return true;
+}
+
+async function loadStateAndApply({ force = false } = {}) {
+  const snap = await fetchState();
+  stState = snap;
+  stStateFresh = !!(snap && snap.fresh);
+  if (stStateFresh || force) await applyStateIfFresh(snap, { force });
+  renderFollowBanner();
+  // Re-render log with chat filter if chatId available.
+  renderLog();
+  return snap;
+}
+
+function markOverride(reason) {
+  if (!stFollow) return;  // already overridden
+  stFollow = false;
+  renderFollowBanner();
+}
+
+async function resyncWithST() {
+  stFollow = true;
+  await loadStateAndApply({ force: true });
+  showToast('Re-synced with ST');
+}
+
+// ─── Phase 2: Send-to-ST ──────────────────────────────
+function updateSendToStButton() {
+  const btn = document.getElementById('sendToStBtn');
+  const copyBtn = document.getElementById('copyBtn');
+  if (!btn) return;
+  const canSend = !!(stStateFresh && stState);
+  btn.disabled = !canSend;
+  btn.title = canSend
+    ? 'Send directly to SillyTavern'
+    : 'ST not connected — use Copy instead';
+  // Promote Copy to primary when Send unavailable, demote back when available.
+  if (copyBtn) {
+    copyBtn.classList.toggle('primary', !canSend);
+  }
+}
+
+function toggleAutoSend(on) {
+  autoSendToST = !!on;
+  localStorage.setItem('dictation.autoSend', autoSendToST ? '1' : '0');
+}
+
+// ─── Phase 2.5C: last-result pill ─────────────────────
+function showLastResultPill(text, meta) {
+  if (!text) return;
+  lastResult = {
+    text,
+    raw: (meta && meta.raw) || '',
+    cleaned: (meta && meta.cleaned) || '',
+    mode: (meta && meta.mode) || currentMode || '',
+    expiresAt: Date.now() + PILL_TTL_MS,
+  };
+
+  const pill = document.getElementById('lastResultPill');
+  const preview = document.getElementById('pillPreview');
+  if (!pill || !preview) return;
+
+  // Preview: collapse whitespace, truncate, keep a single line.
+  const collapsed = text.replace(/\s+/g, ' ').trim();
+  preview.textContent = collapsed.length > PILL_PREVIEW_MAX
+    ? collapsed.slice(0, PILL_PREVIEW_MAX - 1) + '…'
+    : collapsed;
+
+  pill.style.display = '';
+  pill.style.setProperty('--ttl-pct', '100%');
+  // Re-trigger entrance animation each appearance.
+  pill.classList.remove('entering');
+  void pill.offsetWidth; // force reflow so animation replays
+  pill.classList.add('entering');
+
+  // Countdown + auto-dismiss.
+  if (pillTimer) clearTimeout(pillTimer);
+  if (pillTickTimer) clearInterval(pillTickTimer);
+  pillTimer = setTimeout(dismissLastResult, PILL_TTL_MS);
+  pillTickTimer = setInterval(() => {
+    if (!lastResult) return;
+    const remaining = Math.max(0, lastResult.expiresAt - Date.now());
+    const pct = Math.max(0, (remaining / PILL_TTL_MS) * 100);
+    pill.style.setProperty('--ttl-pct', pct + '%');
+  }, 1000);
+
+  updatePillActions();
+}
+
+function updatePillActions() {
+  const sendBtn = document.getElementById('pillSendBtn');
+  if (sendBtn) {
+    const canSend = !!(stStateFresh && stState);
+    sendBtn.disabled = !canSend;
+    sendBtn.title = canSend ? 'Re-send to ST' : 'ST not connected';
+  }
+}
+
+function dismissLastResult() {
+  if (pillTimer) { clearTimeout(pillTimer); pillTimer = null; }
+  if (pillTickTimer) { clearInterval(pillTickTimer); pillTickTimer = null; }
+  const pill = document.getElementById('lastResultPill');
+  if (pill) pill.style.display = 'none';
+  lastResult = null;
+}
+
+async function pillCopy() {
+  if (!lastResult) return;
+  try {
+    await navigator.clipboard.writeText(lastResult.text);
+    showToast('Copied');
+  } catch {
+    showToast('Copy failed');
+  }
+}
+
+async function pillSend() {
+  if (!lastResult) return;
+  if (!(stStateFresh && stState)) { showToast('ST not connected'); return; }
+  try {
+    const resp = await fetch('/send-to-st', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: lastResult.text,
+        raw: lastResult.raw,
+        cleaned: lastResult.cleaned,
+        mode: lastResult.mode,
+        auto_send: autoSendToST,
+      }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) { showToast('Send failed'); return; }
+    if ((data.subscribers || 0) === 0) showToast('No ST listeners');
+    else showToast(autoSendToST ? 'Re-sent to ST ✓ (auto)' : 'Re-sent to ST ✓');
+  } catch {
+    showToast('Send failed');
+  }
+}
+
+function expandLastResult() {
+  // Restore the pill's text into the main result editor (tap-to-bring-back).
+  if (!lastResult) return;
+  resultText.value = lastResult.text;
+  resultArea.classList.add('visible');
+  // Scroll result into view on phone.
+  try { resultArea.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch {}
+}
+
+async function sendToST() {
+  const text = (resultText.value || '').trim();
+  if (!text) { showToast('Nothing to send'); return; }
+  const btn = document.getElementById('sendToStBtn');
+  if (btn) { btn.disabled = true; }
+  const body = {
+    text,
+    raw: lastRawText || '',
+    mode: lastUsedMode || currentMode || '',
+    auto_send: autoSendToST,
+  };
+  try {
+    const resp = await fetch('/send-to-st', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      showToast('Send failed: ' + (data.error || resp.status));
+      return;
+    }
+    const subs = data.subscribers || 0;
+    if (subs === 0) {
+      // No ST tabs listening — fall back to clipboard so the user isn't stuck.
+      try { await navigator.clipboard.writeText(text); } catch {}
+      showToast('No ST listeners — copied to clipboard');
+    } else if (autoSendToST) {
+      showToast('Sent to ST ✓ (auto-sending)');
+    } else {
+      showToast('Sent to ST ✓');
+    }
+  } catch (e) {
+    showToast('Send failed: ' + (e?.message || 'network'));
+  } finally {
+    // Re-evaluate state-driven enable/disable
+    updateSendToStButton();
+  }
+}
+
+function startStatePolling() {
+  stopStatePolling();
+  if (!FOLLOW_ST_FROM_URL) return;
+  statePollTimer = setInterval(() => {
+    if (statePollVisible) loadStateAndApply();
+  }, STATE_POLL_MS);
+  document.addEventListener('visibilitychange', () => {
+    statePollVisible = !document.hidden;
+    if (statePollVisible) loadStateAndApply();
+  });
+}
+
+function stopStatePolling() {
+  if (statePollTimer) { clearInterval(statePollTimer); statePollTimer = null; }
+}
+
+async function persistCharMode(charId, modeId) {
+  if (!charId || !modeId) return;
+  try {
+    await fetch('/state/mode-memory', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ character: charId, mode: modeId }),
+    });
+  } catch { /* best-effort */ }
+}
+
+function toggleResultRow(id) {
+  const el = document.getElementById(id);
+  if (el) el.classList.toggle('open');
+}
+
 function init() {
   loadVadSettings();
   loadModes();          // fetches /modes, renders chips, then posts 'dictation-ready'
@@ -3738,6 +4922,15 @@ function init() {
   loadRecentChats();
   setupEmbedMessaging();
   checkCertHealth();
+  // Phase 2: restore auto-send preference.
+  const autoToggle = document.getElementById('autoSendToggle');
+  if (autoToggle) autoToggle.checked = autoSendToST;
+  updateSendToStButton();
+  // Phase 1: follow ST state. Wait for modes/personas/characters to load,
+  // then apply state so selection actually sticks.
+  setTimeout(() => {
+    loadStateAndApply().then(() => startStatePolling());
+  }, 400);
 }
 
 if (document.readyState === 'loading') {
@@ -3782,6 +4975,61 @@ class DictationHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _handle_sse_stream(self):
+        """Phase 2 — SSE stream at GET /events.
+
+        Writes event-stream headers, then blocks reading from our dedicated
+        subscriber queue. 15s comment heartbeats keep intermediaries from
+        timing out the connection. Exits cleanly on any socket error.
+        """
+        # Headers
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache, no-transform")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")  # hint for any reverse proxy
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
+        sub = subscribe_events()
+        # Opening event so clients can confirm the pipe is live.
+        try:
+            self.wfile.write(b"event: ready\ndata: {}\n\n")
+            self.wfile.flush()
+        except Exception:
+            unsubscribe_events(sub)
+            return
+
+        heartbeat_interval = 15.0
+        try:
+            while True:
+                try:
+                    evt = sub.get(timeout=heartbeat_interval)
+                except queue.Empty:
+                    # Heartbeat — SSE comment lines start with ':'
+                    try:
+                        self.wfile.write(b": heartbeat\n\n")
+                        self.wfile.flush()
+                    except Exception:
+                        break
+                    continue
+
+                event_type, payload = evt
+                try:
+                    data = json.dumps(payload, ensure_ascii=False)
+                except Exception as e:
+                    log.warning("SSE payload not JSON-serializable: %s", e)
+                    continue
+                frame = f"event: {event_type}\ndata: {data}\n\n".encode("utf-8")
+                try:
+                    self.wfile.write(frame)
+                    self.wfile.flush()
+                except Exception:
+                    # Client disconnected.
+                    break
+        finally:
+            unsubscribe_events(sub)
 
     def _handle_transcript_export(self):
         """GET /transcript/export.md — render the current session as markdown."""
@@ -3899,7 +5147,11 @@ class DictationHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(body)
         elif path == "/health":
             days = cert_days_remaining()
-            payload = {"status": "ok"}
+            payload = {
+                "status": "ok",
+                "default_provider": DEFAULT_FORMATTER_PROVIDER,
+                "providers": ["claude", "openai"],
+            }
             if days is not None:
                 payload["cert_expires_days"] = days
                 if days < CERT_WARN_THRESHOLD_DAYS:
@@ -3910,7 +5162,22 @@ class DictationHandler(http.server.BaseHTTPRequestHandler):
                     )
             self.send_json(payload)
         elif path == "/transcript":
-            self.send_json({"transcript": session_transcript})
+            # Optional ?chat=<id> filter scopes the session log to a single chat.
+            # Empty filter returns everything (legacy behavior).
+            chat_filter = query.get("chat", [""])[0]
+            with transcript_lock:
+                if chat_filter:
+                    filtered = [
+                        e for e in session_transcript
+                        if e.get("chat_id", "") == chat_filter
+                    ]
+                    self.send_json({
+                        "transcript": filtered,
+                        "total": len(session_transcript),
+                        "chat": chat_filter,
+                    })
+                else:
+                    self.send_json({"transcript": list(session_transcript)})
         elif path == "/transcript/export.md":
             self._handle_transcript_export()
         elif path == "/personas":
@@ -3963,6 +5230,26 @@ class DictationHandler(http.server.BaseHTTPRequestHandler):
             self.send_json({"modes": [mode_public_view(m) for m in modes]})
         elif path == "/vocab":
             self.send_json({"vocab": load_vocab()})
+        elif path == "/events":
+            # Phase 2 — SSE stream. Long-lived; we block on the subscriber queue
+            # until the client disconnects. ThreadingHTTPServer gives us a
+            # dedicated thread so other requests proceed.
+            self._handle_sse_stream()
+            return
+        elif path == "/state":
+            # Phase 3 — current ST state snapshot with freshness.
+            self.send_json(snapshot_state())
+        elif path == "/state/mode-memory":
+            # GET /state/mode-memory            -> full {char_id: mode_id} map
+            # GET /state/mode-memory?character= -> { character, mode } for one char
+            char = query.get("character", [""])[0]
+            if char:
+                self.send_json({
+                    "character": char,
+                    "mode": get_char_mode(char),
+                })
+            else:
+                self.send_json({"modes": load_char_modes()})
         else:
             self.send_response(404)
             self.end_headers()
@@ -3973,8 +5260,24 @@ class DictationHandler(http.server.BaseHTTPRequestHandler):
         query = urllib.parse.parse_qs(parsed.query)
         if path == "/transcript":
             wipe_all = query.get("all", ["0"])[0] == "1"
+            chat_filter = query.get("chat", [""])[0]
             with transcript_lock:
-                if wipe_all:
+                if chat_filter:
+                    # Scoped clear: only entries tagged with this chat_id.
+                    # Respects starred unless wipe_all=1.
+                    before = len(session_transcript)
+                    if wipe_all:
+                        keep = [e for e in session_transcript if e.get("chat_id", "") != chat_filter]
+                    else:
+                        keep = [
+                            e for e in session_transcript
+                            if e.get("chat_id", "") != chat_filter or e.get("starred")
+                        ]
+                    cleared = before - len(keep)
+                    kept = len([e for e in session_transcript
+                                if e.get("chat_id", "") == chat_filter and e.get("starred")])
+                    session_transcript[:] = keep
+                elif wipe_all:
                     cleared = len(session_transcript)
                     kept = 0
                     session_transcript.clear()
@@ -3984,9 +5287,9 @@ class DictationHandler(http.server.BaseHTTPRequestHandler):
                     cleared = before - len(to_keep)
                     kept = len(to_keep)
                     session_transcript[:] = to_keep
-            log.info("Session transcript cleared (wipe_all=%s, cleared=%d, kept_starred=%d)",
-                     wipe_all, cleared, kept)
-            self.send_json({"cleared": cleared, "kept_starred": kept})
+            log.info("Session transcript cleared (wipe_all=%s, chat=%s, cleared=%d, kept_starred=%d)",
+                     wipe_all, chat_filter or "*", cleared, kept)
+            self.send_json({"cleared": cleared, "kept_starred": kept, "chat": chat_filter})
         elif path.startswith("/transcript/"):
             entry_id = urllib.parse.unquote(path[len("/transcript/"):]).strip()
             if not entry_id:
@@ -4043,6 +5346,77 @@ class DictationHandler(http.server.BaseHTTPRequestHandler):
             self._handle_reformat(params)
         elif path == "/vocab":
             self._handle_vocab_add()
+        elif path == "/state":
+            # Phase 3 — ST extension (or any client) pushes current state.
+            # Expected body: partial or full state payload; missing fields are preserved.
+            try:
+                body = self.read_json_body()
+            except Exception:
+                self.send_error_json("Invalid JSON", code="bad_json", status=400)
+                return
+            if not isinstance(body, dict):
+                self.send_error_json("Expected a JSON object", code="bad_input", status=400)
+                return
+            snap = update_state(body)
+            self.send_json(snap)
+        elif path == "/send-to-st":
+            # Phase 2 — phone (or any client) pushes text to ST via SSE fan-out.
+            # Body: {text: str, raw?: str, cleaned?: str, mode?: str,
+            #        formatting_skipped?: bool, formatting_reason?: str,
+            #        auto_send?: bool}
+            # The ST extension subscribed to /events receives a 'dictation-result'
+            # event and writes to the chat textarea (and optionally auto-sends).
+            try:
+                body = self.read_json_body()
+            except Exception:
+                self.send_error_json("Invalid JSON", code="bad_json", status=400)
+                return
+            if not isinstance(body, dict):
+                self.send_error_json("Expected a JSON object", code="bad_input", status=400)
+                return
+            text = str(body.get("text", "")).strip()
+            if not text:
+                self.send_error_json("Missing 'text'", code="missing_param", status=400)
+                return
+            payload = {
+                "text": text,
+                "raw": str(body.get("raw", "")),
+                "cleaned": str(body.get("cleaned", "")),
+                "mode": str(body.get("mode", "")),
+                "formatting_skipped": bool(body.get("formatting_skipped", False)),
+                "formatting_reason": str(body.get("formatting_reason", "")),
+                "auto_send": bool(body.get("auto_send", False)),
+                "ts": time.time(),
+            }
+            delivered = broadcast_event("dictation-result", payload)
+            self.send_json({
+                "status": "queued",
+                "subscribers": delivered,
+            })
+        elif path == "/state/mode-memory":
+            # Phase 3 — persist per-character mode selection.
+            # Body: {character: <id>, mode: <mode_id>}
+            try:
+                body = self.read_json_body()
+            except Exception:
+                self.send_error_json("Invalid JSON", code="bad_json", status=400)
+                return
+            char = str((body or {}).get("character", "")).strip()
+            mode_id = str((body or {}).get("mode", "")).strip()
+            if not char:
+                self.send_error_json("Missing 'character'",
+                                     code="missing_param", status=400)
+                return
+            if mode_id and get_mode(mode_id) is None:
+                self.send_error_json(f"Unknown mode '{mode_id}'",
+                                     code="unknown_mode", status=400)
+                return
+            updated = save_char_mode(char, mode_id)
+            self.send_json({
+                "character": char,
+                "mode": mode_id,
+                "modes": updated,
+            })
         elif path.startswith("/transcript/") and path.endswith("/star"):
             # POST /transcript/<entry_id>/star — toggle starred on one entry
             mid = path[len("/transcript/"):-len("/star")]
@@ -4143,6 +5517,9 @@ class DictationHandler(http.server.BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             rp_int = 2
         mode = resolve_mode(rp=rp_int, mode_id=mode_id)
+        provider = normalize_formatter_provider(
+            data.get("provider") or params.get("provider", [""])[0] or DEFAULT_FORMATTER_PROVIDER
+        )
 
         context = data.get("context", "")
         chat_source = data.get("chat_source", "")
@@ -4198,7 +5575,7 @@ class DictationHandler(http.server.BaseHTTPRequestHandler):
                         break
 
         # Run pipeline (I/O; don't hold the lock).
-        formatted, formatting_skipped, formatting_reason = run_pipeline(
+        formatted, formatting_skipped, formatting_reason, cleaned_text = run_pipeline(
             text, mode,
             context=context,
             persona_id=persona_id,
@@ -4206,12 +5583,14 @@ class DictationHandler(http.server.BaseHTTPRequestHandler):
             chat_context=chat_context,
             use_rules=use_rules,
             prose_format=prose_format,
+            provider=provider,
         )
 
         # Only append / replace in transcript for enhancement-style modes that succeeded.
         pipeline_steps = mode.get("pipeline", [])
         is_enhancement = any(s in pipeline_steps for s in ("rp_enhance", "persona_pov"))
         result_entry_id: str | None = None
+        chat_id_tag = ""
         with transcript_lock:
             if is_enhancement and not formatting_skipped:
                 if target_index is not None and target_index < len(session_transcript):
@@ -4222,12 +5601,17 @@ class DictationHandler(http.server.BaseHTTPRequestHandler):
                     # starred is preserved implicitly (dict mutation)
                     result_entry_id = existing.get("id")
                 else:
+                    # If the user has a fresh ST state, tag new reformat entries with
+                    # that chat id so per-chat filtering works.
+                    _st_snap = snapshot_state()
+                    chat_id_tag = _st_snap.get("chatId", "") if _st_snap.get("fresh") else ""
                     new_entry = {
                         "id": _new_entry_id(),
                         "role": "user",
                         "text": formatted,
                         "timestamp": datetime.now().isoformat(),
                         "starred": False,
+                        "chat_id": chat_id_tag,
                     }
                     session_transcript.append(new_entry)
                     result_entry_id = new_entry["id"]
@@ -4236,22 +5620,37 @@ class DictationHandler(http.server.BaseHTTPRequestHandler):
         self.send_json({
             "text": formatted,
             "raw": text,
+            "cleaned": cleaned_text,
             "mode": mode.get("id"),
+            "provider": provider,
             "transcript_count": transcript_count,
             "formatting_skipped": formatting_skipped,
             "formatting_reason": formatting_reason,
             "entry_id": result_entry_id,
+            "chat_id": chat_id_tag,
         })
 
     def _handle_transcribe(self, params):
         """Transcribe audio and run the selected pipeline."""
-        # Resolve mode: new `mode=<id>` wins over legacy `rp=0|1|2`.
+        # Phase 3: `use_state=1` resolves persona/character/mode/chat_source from
+        # the live ST state broadcast. Explicit query params still win if both
+        # are provided (manual override on the phone UI).
+        use_state = params.get("use_state", ["0"])[0] == "1"
+        state_snap = snapshot_state() if use_state else {}
+        state_fresh = state_snap.get("fresh", False)
+
+        # Resolve mode: explicit param > state.mode > remembered per-char > legacy rp.
         mode_id = params.get("mode", [""])[0]
+        if not mode_id and state_fresh:
+            mode_id = state_snap.get("mode", "") or state_snap.get("rememberedMode", "")
         try:
             rp_int = int(params.get("rp", ["0"])[0])
         except ValueError:
             rp_int = 0
         mode = resolve_mode(rp=rp_int, mode_id=mode_id)
+        provider = normalize_formatter_provider(
+            params.get("provider", [DEFAULT_FORMATTER_PROVIDER])[0]
+        )
 
         # Model: explicit query param overrides mode default.
         model = params.get("model", [mode.get("whisper_model", DEFAULT_MODEL)])[0]
@@ -4262,6 +5661,24 @@ class DictationHandler(http.server.BaseHTTPRequestHandler):
         character_id = params.get("character", [""])[0]
         use_rules = params.get("rules", ["0"])[0] == "1"
         prose_format = params.get("prose", ["0"])[0] == "1"
+
+        # Phase 3: fill in blanks from state when `use_state=1` and state is fresh.
+        # Explicit params always take precedence over state (manual override wins).
+        if use_state and state_fresh:
+            if not persona_id:
+                persona_id = state_snap.get("personaId", "")
+            if not character_id:
+                character_id = state_snap.get("characterId", "")
+            if not context and state_snap.get("lastAiMessage"):
+                context = state_snap["lastAiMessage"]
+            if not chat_source and state_snap.get("chatId"):
+                ctype = state_snap.get("chatType", "individual") or "individual"
+                chat_source = f"{ctype}:{state_snap['chatId']}"
+
+        # chat_id tag for per-chat transcript filtering (Phase 3)
+        chat_id_for_entry = ""
+        if state_fresh and state_snap.get("chatId"):
+            chat_id_for_entry = state_snap["chatId"]
 
         # Build chat context if source is not manual
         chat_context = ""
@@ -4338,10 +5755,11 @@ class DictationHandler(http.server.BaseHTTPRequestHandler):
                             "text": context.strip(),
                             "timestamp": datetime.now().isoformat(),
                             "starred": False,
+                            "chat_id": chat_id_for_entry,
                         })
 
             # Run pipeline
-            output_text, formatting_skipped, formatting_reason = run_pipeline(
+            output_text, formatting_skipped, formatting_reason, cleaned_text = run_pipeline(
                 raw_text, mode,
                 context=context,
                 persona_id=persona_id,
@@ -4349,6 +5767,7 @@ class DictationHandler(http.server.BaseHTTPRequestHandler):
                 chat_context=chat_context,
                 use_rules=use_rules,
                 prose_format=prose_format,
+                provider=provider,
             )
 
             # Log to session transcript only for enhancement modes with success
@@ -4360,6 +5779,7 @@ class DictationHandler(http.server.BaseHTTPRequestHandler):
                         "text": output_text,
                         "timestamp": datetime.now().isoformat(),
                         "starred": False,
+                        "chat_id": chat_id_for_entry,
                     })
 
             with transcript_lock:
@@ -4368,10 +5788,13 @@ class DictationHandler(http.server.BaseHTTPRequestHandler):
             self.send_json({
                 "text": output_text,
                 "raw": raw_text,
+                "cleaned": cleaned_text,
                 "mode": mode.get("id"),
+                "provider": provider,
                 "transcript_count": transcript_count,
                 "formatting_skipped": formatting_skipped,
                 "formatting_reason": formatting_reason,
+                "chat_id": chat_id_for_entry or "",
             })
 
         except FileNotFoundError as e:
@@ -4435,7 +5858,8 @@ def main():
     log.info(
         f"Config format: {'YAML' if _HAVE_YAML else 'JSON (PyYAML unavailable)'} | "
         f"modes: {len(initial_modes)} ({', '.join(m.get('id','') for m in initial_modes)}) | "
-        f"vocab entries: {len(load_vocab())}"
+        f"vocab entries: {len(load_vocab())} | "
+        f"formatters: claude={CLAUDE_PROXY_URL}, openai={OPENAI_PROXY_URL}, default={DEFAULT_FORMATTER_PROVIDER}"
     )
 
     server = http.server.ThreadingHTTPServer((args.host, args.port), DictationHandler)

@@ -31,7 +31,16 @@ const DEFAULTS = {
     openStyle: 'popup',          // 'popup' | 'iframe'
     liveMirror: false,           // dictation-edit -> textarea while typing on phone
     pushContext: true,           // send last AI message to server on ready
+    broadcastState: true,        // POST /state on chat/char/persona change + 30s heartbeat
+    sseEnabled: true,            // Phase 2: subscribe to /events for direct-inject from phone
 };
+
+// Phase 1: state broadcast.
+// Posts current ST context to <serverUrl>/state so the phone UI can auto-
+// configure without the user re-picking mode/character each time.
+const STATE_HEARTBEAT_MS = 30_000;
+let stateHeartbeatTimer = null;
+let lastStatePayload = null; // for dedupe — avoid firing on duplicate events
 
 /** Active connection (popup window or iframe element). */
 let activeTarget = null;
@@ -94,6 +103,179 @@ function currentContext() {
     }
 
     return { chatId, personaId, characterId, lastAi, groupName: s?.name || '' };
+}
+
+/** Build the /state payload the server expects. */
+function buildStatePayload() {
+    const ctx = currentContext();
+    const s = selected_group
+        ? (groups?.find(g => g.id == selected_group) || null)
+        : (characters?.[this_chid] || null);
+    const characterName = selected_group
+        ? (s?.name || '')
+        : (characters?.[this_chid]?.name || '');
+    return {
+        chatId: ctx.chatId,
+        chatType: selected_group ? 'group' : 'solo',
+        characterId: ctx.characterId,
+        characterName,
+        personaId: ctx.personaId,
+        lastAiMessage: ctx.lastAi,
+        sourceDevice: 'st-desktop',
+    };
+}
+
+/** Fire-and-forget POST to /state. Silent on failure — server may be off. */
+async function postState(reason) {
+    if (!settings().broadcastState) return;
+    const payload = buildStatePayload();
+    if (!payload.chatId && !payload.characterId) return; // no context loaded yet
+    // Dedupe identical payloads within 2s window (ST fires overlapping events)
+    const key = JSON.stringify(payload);
+    if (lastStatePayload && lastStatePayload.key === key
+        && (Date.now() - lastStatePayload.t) < 2000) return;
+    lastStatePayload = { key, t: Date.now() };
+
+    const url = `${settings().serverUrl.replace(/\/+$/, '')}/state`;
+    try {
+        await fetch(url, {
+            method: 'POST',
+            mode: 'cors',
+            cache: 'no-store',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+    } catch (e) {
+        // Expected when server is off; don't spam logs.
+        if (reason === 'heartbeat') return;
+        WARN(`postState[${reason}] failed`, e?.message || e);
+    }
+}
+
+function startStateHeartbeat() {
+    stopStateHeartbeat();
+    if (!settings().broadcastState) return;
+    stateHeartbeatTimer = setInterval(() => postState('heartbeat'), STATE_HEARTBEAT_MS);
+}
+
+function stopStateHeartbeat() {
+    if (stateHeartbeatTimer) { clearInterval(stateHeartbeatTimer); stateHeartbeatTimer = null; }
+}
+
+// ─── Phase 2: SSE direct-inject from phone ─────────────────────────────────
+// The phone POSTs to /send-to-st, which fans out to all ST tabs subscribed
+// to /events. Reconnect is best-effort with exponential backoff.
+let sseSource = null;
+let sseReconnectDelay = 1000;
+const SSE_RECONNECT_CAP = 30_000;
+let sseReconnectTimer = null;
+let sseStatus = { state: 'disconnected', lastEventAt: 0, lastError: '' };
+
+function updateSseStatusIndicator() {
+    const dot = document.getElementById('dictation_bridge_sse_dot');
+    const label = document.getElementById('dictation_bridge_sse_label');
+    if (!dot || !label) return;
+    const colors = {
+        connected: '#4caf50',
+        connecting: '#e6a756',
+        disconnected: '#7a7a9a',
+        error: '#cc5555',
+    };
+    dot.style.background = colors[sseStatus.state] || colors.disconnected;
+    const ago = sseStatus.lastEventAt
+        ? ` (last ${Math.max(0, Math.round((Date.now() - sseStatus.lastEventAt) / 1000))}s ago)`
+        : '';
+    label.textContent = `SSE: ${sseStatus.state}${ago}`;
+}
+
+function connectSSE() {
+    if (!settings().sseEnabled) return;
+    disconnectSSE(); // ensure single connection
+
+    const url = `${settings().serverUrl.replace(/\/+$/, '')}/events`;
+    try {
+        sseSource = new EventSource(url);
+        sseStatus.state = 'connecting';
+        updateSseStatusIndicator();
+    } catch (e) {
+        ERR('SSE construct failed', e?.message || e);
+        sseStatus.state = 'error';
+        sseStatus.lastError = e?.message || String(e);
+        updateSseStatusIndicator();
+        scheduleSseReconnect();
+        return;
+    }
+
+    sseSource.addEventListener('open', () => {
+        LOG('SSE open');
+        sseStatus.state = 'connected';
+        sseReconnectDelay = 1000; // reset backoff
+        updateSseStatusIndicator();
+    });
+
+    sseSource.addEventListener('ready', (e) => {
+        // Server's opening handshake.
+        sseStatus.state = 'connected';
+        sseStatus.lastEventAt = Date.now();
+        updateSseStatusIndicator();
+    });
+
+    sseSource.addEventListener('dictation-result', (e) => {
+        sseStatus.lastEventAt = Date.now();
+        updateSseStatusIndicator();
+        let data;
+        try { data = JSON.parse(e.data); }
+        catch { WARN('SSE dictation-result: bad JSON'); return; }
+        const text = String(data.text || '').trim();
+        if (!text) { WARN('SSE dictation-result: empty text'); return; }
+        const cfg = settings();
+        // Per-event auto_send overrides setting when explicitly true; otherwise setting applies.
+        const doAutoSend = data.auto_send === true ? true : !!cfg.autoSend;
+        writeToTextarea(text, { autoSend: doAutoSend, appendMode: cfg.appendMode });
+        if (data.formatting_skipped && window.toastr) {
+            const reason = data.formatting_reason ? `: ${data.formatting_reason}` : '';
+            window.toastr.warning(`RP formatting skipped${reason}. Raw transcript used.`, 'Dictation Bridge');
+        } else if (window.toastr) {
+            window.toastr.success('Received from phone', 'Dictation Bridge', { timeOut: 1500 });
+        }
+    });
+
+    sseSource.addEventListener('error', (e) => {
+        // EventSource auto-reconnects, but on a closed state we force our own
+        // backoff path so the UI reflects it and self-signed cert failures
+        // don't silently loop.
+        if (sseSource && sseSource.readyState === EventSource.CLOSED) {
+            sseStatus.state = 'error';
+            sseStatus.lastError = 'Connection closed';
+            updateSseStatusIndicator();
+            scheduleSseReconnect();
+        } else {
+            sseStatus.state = 'connecting';
+            updateSseStatusIndicator();
+        }
+    });
+}
+
+function scheduleSseReconnect() {
+    if (sseReconnectTimer) return;
+    if (!settings().sseEnabled) return;
+    const delay = sseReconnectDelay;
+    sseReconnectDelay = Math.min(SSE_RECONNECT_CAP, sseReconnectDelay * 2);
+    LOG(`SSE reconnect in ${delay}ms`);
+    sseReconnectTimer = setTimeout(() => {
+        sseReconnectTimer = null;
+        connectSSE();
+    }, delay);
+}
+
+function disconnectSSE() {
+    if (sseReconnectTimer) { clearTimeout(sseReconnectTimer); sseReconnectTimer = null; }
+    if (sseSource) {
+        try { sseSource.close(); } catch {}
+        sseSource = null;
+    }
+    sseStatus.state = 'disconnected';
+    updateSseStatusIndicator();
 }
 
 function buildEmbedUrl() {
@@ -357,6 +539,21 @@ function buildSettingsPanel() {
                         <span>Live mirror edits from server (experimental)</span>
                     </label>
 
+                    <label class="checkbox_label">
+                        <input id="dictation_bridge_broadcast_state" type="checkbox" />
+                        <span>Broadcast ST state to dictation server (phone follows ST)</span>
+                    </label>
+
+                    <label class="checkbox_label">
+                        <input id="dictation_bridge_sse_enabled" type="checkbox" />
+                        <span>Receive dictation from phone via SSE (direct inject)</span>
+                    </label>
+
+                    <div class="dictation-bridge-sse-status" style="display:flex;align-items:center;gap:8px;margin:4px 0 6px;font-size:12px;color:var(--SmartThemeBodyColor, #aaa)">
+                        <span id="dictation_bridge_sse_dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#7a7a9a"></span>
+                        <span id="dictation_bridge_sse_label">SSE: disconnected</span>
+                    </div>
+
                     <small class="notes">
                         The dictation server must be running and reachable.
                         Self-signed cert: visit the URL once in a browser tab and accept the warning before using the mic button.
@@ -376,6 +573,8 @@ function buildSettingsPanel() {
     const autoEl = host.querySelector('#dictation_bridge_autosend');
     const pushEl = host.querySelector('#dictation_bridge_push_context');
     const mirrorEl = host.querySelector('#dictation_bridge_live_mirror');
+    const broadcastEl = host.querySelector('#dictation_bridge_broadcast_state');
+    const sseEl = host.querySelector('#dictation_bridge_sse_enabled');
 
     urlEl.value = s.serverUrl;
     openEl.value = s.openStyle;
@@ -383,13 +582,37 @@ function buildSettingsPanel() {
     autoEl.checked = !!s.autoSend;
     pushEl.checked = !!s.pushContext;
     mirrorEl.checked = !!s.liveMirror;
+    broadcastEl.checked = !!s.broadcastState;
+    sseEl.checked = !!s.sseEnabled;
+    updateSseStatusIndicator(); // paint initial dot color
 
-    urlEl.addEventListener('change', () => { s.serverUrl = urlEl.value.trim() || DEFAULTS.serverUrl; saveSettings(); });
+    urlEl.addEventListener('change', () => {
+        s.serverUrl = urlEl.value.trim() || DEFAULTS.serverUrl;
+        saveSettings();
+        // URL changed — if SSE is on, reconnect to the new host.
+        if (s.sseEnabled) connectSSE();
+    });
     openEl.addEventListener('change', () => { s.openStyle = openEl.value; saveSettings(); });
     appendEl.addEventListener('change', () => { s.appendMode = appendEl.value; saveSettings(); });
     autoEl.addEventListener('change', () => { s.autoSend = !!autoEl.checked; saveSettings(); });
     pushEl.addEventListener('change', () => { s.pushContext = !!pushEl.checked; saveSettings(); });
     mirrorEl.addEventListener('change', () => { s.liveMirror = !!mirrorEl.checked; saveSettings(); });
+    broadcastEl.addEventListener('change', () => {
+        s.broadcastState = !!broadcastEl.checked;
+        saveSettings();
+        if (s.broadcastState) {
+            startStateHeartbeat();
+            postState('toggle-on');
+        } else {
+            stopStateHeartbeat();
+        }
+    });
+    sseEl.addEventListener('change', () => {
+        s.sseEnabled = !!sseEl.checked;
+        saveSettings();
+        if (s.sseEnabled) connectSSE();
+        else disconnectSSE();
+    });
 }
 
 // ─── Bootstrap ─────────────────────────────────────────────────────────────
@@ -408,6 +631,27 @@ export async function init() {
     } else {
         eventSource.on(event_types.APP_READY, injectMicButton);
     }
+
+    // Phase 1: broadcast ST state to dictation server on context changes.
+    // CHAT_CHANGED fires on chat switch; CHAT_LOADED on initial load; CHARACTER_EDITED
+    // on card edits; SETTINGS_UPDATED catches persona switches (no dedicated event for those).
+    const stateEvents = [
+        event_types.CHAT_CHANGED,
+        event_types.CHAT_LOADED,
+        event_types.CHARACTER_EDITED,
+        event_types.SETTINGS_UPDATED,
+        event_types.APP_READY,
+    ];
+    for (const evt of stateEvents) {
+        if (evt) eventSource.on(evt, () => postState(evt));
+    }
+    startStateHeartbeat();
+    // Initial push in case we loaded mid-chat.
+    setTimeout(() => postState('init'), 1500);
+
+    // Phase 2: subscribe to server-sent events for direct inject from phone.
+    if (settings().sseEnabled) connectSSE();
+
     LOG('initialized');
 }
 

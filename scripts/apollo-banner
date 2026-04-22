@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Apollo ignition readout — one line, ~0.8s
+printf '\033[38;2;255;182;72m  ▸ APOLLO\033[0m \033[38;2;201;178;139m· ignition · systems nominal    \033[38;2;122;106;82mT-00:00:00\033[0m\n'
+sleep 0.8

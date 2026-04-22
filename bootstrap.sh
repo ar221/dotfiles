@@ -66,9 +66,10 @@ overlay_dotfiles() {
     info "Overlaying personal dotfiles..."
 
     local configs=(
-        kitty fish niri starship yazi lazygit btop foot ghostty
+        kitty fish niri starship yazi yazi-apollo lazygit btop foot ghostty
         matugen nvim fastfetch mpv zathura fuzzel git alacritty
         bat cava fontconfig gtk-3.0 gtk-4.0 qt5ct qt6ct paru mpd rmpc
+        tmux opencode
     )
 
     for d in "${configs[@]}"; do
@@ -81,6 +82,14 @@ overlay_dotfiles() {
                 "$DOTFILES_DIR/$d/" "$HOME/.config/$d/"
         fi
     done
+
+    if [[ -d "$DOTFILES_DIR/scripts" ]]; then
+        mkdir -p "$HOME/.local/bin"
+        rsync -a \
+            --exclude='__pycache__/' \
+            --exclude='*.pyc' \
+            "$DOTFILES_DIR/scripts/" "$HOME/.local/bin/"
+    fi
     ok "Personal configs overlaid"
 }
 

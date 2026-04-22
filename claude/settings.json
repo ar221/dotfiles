@@ -214,7 +214,7 @@
       }
     }
   },
-  "effortLevel": "medium",
+  "effortLevel": "high",
   "advisorModel": "opus",
   "skipDangerousModePermissionPrompt": true
 }

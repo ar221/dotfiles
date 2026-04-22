@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Registry-backed project picker that prints a selected workspace path."""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+
+
+CONFIG_PATH = Path("~/.config/apollo/projects.toml").expanduser()
+
+FZF_COLORS = (
+    "fg:#F2E3C6,bg:#0E0B08,hl:#FFB648,"
+    "fg+:#FFD080,bg+:#1C150C,hl+:#FFD080,"
+    "info:#6FC5C0,prompt:#FFB648,pointer:#FFB648,"
+    "marker:#A8C97B,spinner:#D28BD8,header:#C9B28B,"
+    "border:#5A4420"
+)
+
+
+def load_projects() -> list[dict[str, str]]:
+    if not CONFIG_PATH.exists():
+        print(
+            f"error: config not found at {CONFIG_PATH}\n"
+            f"run ~/.local/bin/apollo-sync-projects first.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    data = tomllib.loads(CONFIG_PATH.read_text())
+    projects: list[dict[str, str]] = []
+    for entry in data.get("project", []):
+        path = Path(entry["path"]).expanduser()
+        if not path.exists():
+            continue
+        projects.append(
+            {
+                "name": entry["name"],
+                "path": str(path),
+                "tool": entry.get("tool", "claude"),
+                "coordinator": entry.get("coordinator", ""),
+                "kind": entry.get("kind", ""),
+                "status": entry.get("status", ""),
+            }
+        )
+    return projects
+
+
+def run_fzf(projects: list[dict[str, str]]) -> str:
+    lines = "\n".join(
+        f"{p['name']}\t{p['path']}\t{p['coordinator']}\t{p['tool']}\t{p['status']}"
+        for p in projects
+    )
+
+    fzf_cmd = [
+        "fzf",
+        "--delimiter=\t",
+        "--with-nth=1,2,3,4,5",
+        "--nth=1,2,3",
+        "--prompt=jump> ",
+        "--header=name · path · coordinator · tool · status",
+        "--height=70%",
+        "--layout=reverse",
+        "--border=rounded",
+        "--color",
+        FZF_COLORS,
+    ]
+
+    result = subprocess.run(
+        fzf_cmd,
+        input=lines,
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise SystemExit(0)
+
+    selected = result.stdout.strip()
+    if not selected:
+        raise SystemExit(0)
+    return selected.split("\t")[1]
+
+
+def main() -> int:
+    projects = load_projects()
+    if not projects:
+        print("error: no projects found in generated config.", file=sys.stderr)
+        return 1
+    print(run_fzf(projects))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

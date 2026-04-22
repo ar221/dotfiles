@@ -6,7 +6,7 @@ description: >
   and sloppy assumptions. Returns a numbered, severity-tagged finding list.
   Does NOT implement fixes. Use before any non-trivial commit lands, especially
   on iNiR, scripts in ~/.local/bin/, and systemd units.
-model: opus
+model: inherit
 color: red
 tools:
   - Read

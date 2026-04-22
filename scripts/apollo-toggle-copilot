@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+has_pane_title() {
+  tmux list-panes -F '#{pane_title}' | grep -Fxq "$1"
+}
+
+if has_pane_title "copilot"; then
+  if has_pane_title "rail"; then
+    tmux kill-pane -t rail || true
+  fi
+  tmux kill-pane -t copilot || true
+  tmux set -g @copilot_open 0
+  tmux set -g @rail_open 0
+  tmux display-message "Apollo: co-pilot + rail closed"
+  exit 0
+fi
+
+cwd="$(tmux display-message -p '#{pane_current_path}')"
+main_pane_id="$(tmux display-message -p '#{pane_id}')"
+
+if has_pane_title "rail"; then
+  tmux kill-pane -t rail || true
+fi
+
+tmux split-window -h -l 22% -c "$cwd" "apollo-rail"
+tmux select-pane -T rail
+tmux set -g @rail_open 1
+tmux select-pane -t '!'
+
+tmux split-window -h -l 38% -c "$cwd" "env APOLLO_ROLE=copilot opencode"
+tmux select-pane -T copilot
+tmux set -g @copilot_open 1
+tmux select-pane -t "$main_pane_id"
+
+tmux display-message "Apollo: co-pilot + rail open"

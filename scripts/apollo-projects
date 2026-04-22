@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# apollo-projects — emit project rows for the Constellation launchpad.
+# Output: one row per project, tab-separated: "<name>\t<path>\t<status>"
+# Source of truth: ~/.config/apollo/projects.toml (generated from the vault
+# workspace registry). Recents are prepended with a ▸ glyph. Duplicates are
+# collapsed by realpath.
+
+set -euo pipefail
+
+RECENTS_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/apollo/recents"
+CONFIG_FILE="$HOME/.config/apollo/projects.toml"
+
+if [[ ! -f "$CONFIG_FILE" ]]; then
+    printf 'error: config not found at %s\nrun: ~/.local/bin/apollo-sync-projects\n' "$CONFIG_FILE" >&2
+    exit 1
+fi
+
+mapfile -t sources < <(
+    python - <<'PY' "$CONFIG_FILE"
+import sys
+import tomllib
+from pathlib import Path
+
+config_path = Path(sys.argv[1]).expanduser()
+data = tomllib.loads(config_path.read_text())
+for project in data.get("project", []):
+    path = str(Path(project["path"]).expanduser())
+    status = project.get("status", "")
+    print(f"{project['name']}\t{path}\t{status}")
+PY
+)
+
+# --- Status derivation ---------------------------------------------------
+# Cheap, single-shell-out per project.
+derive_status() {
+    local path="$1"
+    local fallback="$2"
+    if [[ -e "$path/.git" ]]; then
+        local branch
+        branch=$(git -C "$path" symbolic-ref --short HEAD 2>/dev/null || echo "detached")
+        printf 'git:%s' "$branch"
+        return
+    fi
+    # Look for frontmatter status in CLAUDE.md or README.md
+    for f in "$path/CLAUDE.md" "$path/README.md"; do
+        if [[ -f "$f" ]]; then
+            local status
+            status=$(awk '
+                NR==1 { if ($0 != "---") exit; next }
+                /^---$/ { exit }
+                /^status:/ { sub(/^status:[ \t]*/, ""); print; exit }
+            ' "$f")
+            if [[ -n "$status" ]]; then
+                printf '%s' "$status"
+                return
+            fi
+        fi
+    done
+    printf '%s' "$fallback"
+}
+
+# --- Emit rows (recents first) -------------------------------------------
+emitted=()
+
+emit_row() {
+    local name="$1"
+    local path="$2"
+    local fallback_status="$3"
+    local prefix="$4"  # "▸ " for recents, "" otherwise
+    local real status
+    real=$(realpath "$path" 2>/dev/null) || return 0
+    for seen in "${emitted[@]:-}"; do
+        [[ "$seen" == "$real" ]] && return 0
+    done
+    emitted+=("$real")
+    status=$(derive_status "$path" "$fallback_status")
+    printf '%s%s\t%s\t%s\n' "$prefix" "$name" "${path/#$HOME/~}" "$status"
+}
+
+# Recents first
+if [[ -f "$RECENTS_FILE" ]]; then
+    while IFS= read -r recent_path; do
+        [[ -z "$recent_path" ]] && continue
+        [[ -d "$recent_path" ]] || continue
+        recent_real=$(realpath "$recent_path" 2>/dev/null || true)
+        [[ -n "$recent_real" ]] || continue
+        for src in "${sources[@]:-}"; do
+            IFS=$'\t' read -r name path fallback_status <<< "$src"
+            candidate_real=$(realpath "$path" 2>/dev/null || true)
+            [[ "$candidate_real" == "$recent_real" ]] || continue
+            emit_row "$name" "$path" "$fallback_status" "▸ "
+            break
+        done
+    done < "$RECENTS_FILE"
+fi
+
+# Then the rest
+for src in "${sources[@]:-}"; do
+    IFS=$'\t' read -r name path fallback_status <<< "$src"
+    [[ -d "$path" ]] || continue
+    emit_row "$name" "$path" "$fallback_status" ""
+done

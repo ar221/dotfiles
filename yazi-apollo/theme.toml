@@ -1,0 +1,81 @@
+# ~/.config/yazi-apollo/theme.toml
+# Apollo palette mapped to yazi theme slots.
+# Palette source: ™ Apollo Flight-Deck 2026-04/™ Design Spec.md §5.1
+
+[manager]
+cwd     = { fg = "#FFB648" }
+hovered = { fg = "#0E0B08", bg = "#FFB648" }
+preview_hovered = { underline = true }
+find_keyword  = { fg = "#FFB648", italic = true }
+find_position = { fg = "#C9E89B", bg = "reset", italic = true }
+marker_selected = { fg = "#A8C97B", bg = "#A8C97B" }
+marker_copied   = { fg = "#6FC5C0", bg = "#6FC5C0" }
+marker_cut      = { fg = "#FF5A4E", bg = "#FF5A4E" }
+tab_active   = { fg = "#0E0B08", bg = "#FFB648" }
+tab_inactive = { fg = "#C9B28B", bg = "#1C150C" }
+tab_width    = 1
+border_symbol = "│"
+border_style  = { fg = "#5A4420" }
+syntect_theme = ""
+
+[status]
+separator_open  = ""
+separator_close = ""
+separator_style = { fg = "#5A4420", bg = "#1C150C" }
+mode_normal = { fg = "#0E0B08", bg = "#FFB648", bold = true }
+mode_select = { fg = "#0E0B08", bg = "#A8C97B", bold = true }
+mode_unset  = { fg = "#0E0B08", bg = "#FF5A4E", bold = true }
+progress_label  = { fg = "#F2E3C6", bold = true }
+progress_normal = { fg = "#FFB648", bg = "#1C150C" }
+progress_error  = { fg = "#FF5A4E", bg = "#1C150C" }
+permissions_t = { fg = "#6FC5C0" }
+permissions_r = { fg = "#FFB648" }
+permissions_w = { fg = "#FF5A4E" }
+permissions_x = { fg = "#A8C97B" }
+permissions_s = { fg = "#7A6A52" }
+
+[input]
+border   = { fg = "#FFB648" }
+title    = {}
+value    = {}
+selected = { reversed = true }
+
+[select]
+border   = { fg = "#FFB648" }
+active   = { fg = "#FFB648" }
+inactive = {}
+
+[tasks]
+border   = { fg = "#FFB648" }
+title    = {}
+hovered  = { underline = true }
+
+[which]
+mask            = { bg = "#1C150C" }
+cand            = { fg = "#6FC5C0" }
+rest            = { fg = "#7A6A52" }
+desc            = { fg = "#FFB648" }
+separator       = "  "
+separator_style = { fg = "#3A2710" }
+
+[help]
+on      = { fg = "#FFB648" }
+exec    = { fg = "#6FC5C0" }
+desc    = { fg = "#C9B28B" }
+hovered = { bg = "#2B1F10", bold = true }
+footer  = { fg = "#1C150C", bg = "#F2E3C6" }
+
+[filetype]
+rules = [
+    { mime = "image/*",              fg = "#D28BD8" },
+    { mime = "video/*",              fg = "#D28BD8" },
+    { mime = "audio/*",              fg = "#D28BD8" },
+    { mime = "application/zip",      fg = "#FF5A4E" },
+    { mime = "application/gzip",     fg = "#FF5A4E" },
+    { mime = "application/x-tar",    fg = "#FF5A4E" },
+    { mime = "application/x-bzip*",  fg = "#FF5A4E" },
+    { mime = "application/x-7z*",    fg = "#FF5A4E" },
+    { mime = "application/x-rar",    fg = "#FF5A4E" },
+    { name = "*/",                   fg = "#A8C97B" },
+    { name = "*",                    fg = "#F2E3C6" },
+]

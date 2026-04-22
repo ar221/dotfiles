@@ -24,7 +24,7 @@ description: |
   user: "Any new Wayland bar widgets or tools I should check out?"
   <commentary>Tool discovery in the ricing domain — trigger rice-scout.</commentary>
   </example>
-model: sonnet
+model: inherit
 color: cyan
 tools: [WebSearch, WebFetch, Read, Write, Bash, Glob, Grep, Skill, Agent]
 ---

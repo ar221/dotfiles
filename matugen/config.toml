@@ -112,11 +112,14 @@ output_path = '~/.config/mozilla/firefox/3kmy38qw.default-release/chrome/ShyFox/
 # output_path = '~/.cache/wal/colors.json'
 # post_hook = "pywalfox update"
 
-# Adwaita-for-Steam Material You colortheme
-[templates.adwaita-steam]
-input_path = '~/.config/matugen/templates/adwaita-steam.css'
-output_path = '~/.local/share/Steam/steamui/adwaita/colorthemes/matugen/matugen.css'
-post_hook = 'bash ~/.local/bin/adwaita-steam-apply'
+# Adwaita-for-Steam colors are managed by iNiR's Steam module
+# (scripts/colors/modules/70-steam.sh) from rendered
+# ~/.local/state/quickshell/user/generated/steam-colortheme.css.
+# Keep legacy matugen hook disabled to avoid competing imports/themes.
+# [templates.adwaita-steam]
+# input_path = '~/.config/matugen/templates/adwaita-steam.css'
+# output_path = '~/.local/share/Steam/steamui/adwaita/colorthemes/matugen/matugen.css'
+# post_hook = 'bash ~/.local/bin/adwaita-steam-apply'
 
 [templates.iisddmtheme]
 input_path = '~/.config/ii-sddm-theme/SddmColors.qml'

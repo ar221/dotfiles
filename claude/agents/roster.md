@@ -8,7 +8,7 @@ description: |
 
   Consumers: charlotte (HR), the five coordinators (by launch directory), and any
   session that needs to understand how the roster is structured and why.
-model: sonnet
+model: inherit
 color: white
 tools: []
 ---
@@ -79,6 +79,7 @@ Mapping (as of 2026-04-15):
 | STWork | (TBD — creative specialist candidate) | Scheherazade |
 | Steam Deck Port | akbar + garrus | Alfred |
 | Job Hunt | (TBD — writing specialist candidate) | Oracle |
+| Trading Archive | kasparov | Oracle |
 
 "TBD" means no project lead has crystallized yet — work is handled by permanent specialists + contractors until a recurring pattern emerges and earns a dedicated hire.
 
@@ -101,7 +102,67 @@ Detailed protocols live in `/home/ayaz/.claude/agents/charlotte.md`.
 
 Flag this every time a permanent hire ships. Ayaz forgets; the workaround exists; name it explicitly.
 
+## Task-Brief Convention (2026-04-17)
+
+The `/task-brief` skill scaffolds a per-task 3-file triad under `~/Documents/Ayaz OS/03 Projects/<project>/™ tasks/<slug>/` (`™ plan.md`, `™ findings.md`, `™ progress.md`). When a coordinator spawns a specialist, it may include a line of the form `task-brief: <project>/<slug>` in the briefing. Agents consume this line per their tier:
+
+| Tier | Agents | Behavior |
+|------|--------|----------|
+| **A — Material workers** | akbar, artemis, atelier, borges, curator, garrus, gaming, mordin, pitstop, services, sys-optimizer | Read all three files at spawn; append a **session entry** to `™ progress.md` after material work; refresh `updated:` in frontmatter. Entry format is tuned per role (design moves for atelier, xEdit decisions for mordin, measurements for sys-optimizer, etc.). |
+| **A' — Research synthesizers** | dexter, insights-sweep | Read all three at spawn; append a **synthesis section** to `™ findings.md` (not progress — research output is product, not session log); refresh `updated:`. Dexter additionally checks findings.md first to avoid re-researching what's already cited. |
+| **B — Read-only consumers** | charlotte | Reads the triad at spawn (mid-flight gap-fill consults) so designed contractor personas are grounded in actual task state. Does not write — HR persists nothing. Flags missing triads to Ayaz (coordinator skipped `/task-brief` at kickoff). |
+| **C — Skip** | rice-scout, health, reviewer, roster (n/a), scribe (own path) | Do **not** wire in. Rationale below. |
+| **Scribe** | scribe | Special case. Writes to `™ progress.md` via its existing §6 "Task-Brief Mode" — the session-log format (journal-style). If both scribe and a Tier A specialist run on the same task in the same session, both append; formats are distinct enough to not collide. |
+
+**Why the skips:**
+
+- **rice-scout** — web-research only, no project grounding; task state would pollute broad inspiration work.
+- **health** — stateless 11-point diagnostic by charter; no project context needed.
+- **reviewer** — **intentional charter preservation.** Reviewer is an adversarial cold reader — "No context from prior conversation. Do not assume the author's intent was correct." Injecting task-brief context would defeat the premise. Keep reviewer sealed.
+- **roster** — not invocable (reference doc).
+
+**Rules for future hires:**
+
+1. Every new permanent specialist `.md` should end with a `## Task-Brief Mode` section unless the role is charter-incompatible (reviewer-shaped). Charlotte enforces this at draft time.
+2. Every new contractor persona draft should include a tier assignment (A / A' / B / C) and, if A or A', the tuned append format. Borrow from the closest existing specialist's template.
+3. The vault path is hardcoded: `~/Documents/Ayaz OS/03 Projects/<project>/™ tasks/<slug>/`. Don't parameterize it away without a coordinated change across all §6 blocks.
+4. Agents **never scaffold the triad themselves** — that's `/task-brief`'s job. If a briefing references a triad that doesn't exist, warn and fall back to coordinator-report behavior.
+
+**~~Open gap (T1.4 candidate)~~ Closed 2026-04-17 (T1.3b):** all five coordinator identity specs (`oracle-identity.md`, `alfred-identity.md`, `scheherazade-identity.md`, `house-identity.md`, `elsa-identity.md`) now carry a `## Task-Brief Emission` section defining when to emit `task-brief: <project>/<slug>`, when to scaffold via `/task-brief`, and when to skip. Consumers downstream still warn-and-continue if emission is forgotten (rule #4 preserved as safety net).
+
 ## Change Log
+
+### 2026-04-18 — Hired `kasparov` (trading knowledge archivist)
+
+- **Hired (permanent):** `kasparov` — trading knowledge archivist / wiki builder. Opus, tier A' (findings-writer), amber. Named after Garry Kasparov's "Advanced Chess" concept — machine studies, human plays.
+- **Scope:** trading wiki expansion (`00 Notes/Wiki/trading/`), Trading Archive curation (`03 Projects/Trading Archive/`), factual trading-concept research (cited, neutral), and scribe mode for when Ayaz dictates his own playbooks. **Hard-bound by the Trading Boundary** (`~/.claude/shared-memory/trading-boundary.md`) — the refusal reflex is baked into the persona spine, not tacked on.
+- **Does NOT:** generate strategy, setups, trade ideas, position sizing, market commentary, or evaluate trades. No broker APIs, no live accounts, no "what should I trade next" — hard refuses cleanly, no hedging.
+- **Recurring-need evidence:** 4 seeded wiki articles with explicit coverage gaps, 3-tier course archive awaiting mining, standing glossary/platform reference work. 2026-04-17 archive-access lift opened the door; nobody else on the roster fits (curator is clippings-first and doesn't hold a boundary).
+- **60-day check-in:** if kasparov gets invoked <1×/month by mid-June, revisit as vanity-hire candidate.
+- **Registry-snapshot:** new hire, requires `/exit` + relaunch before invocable via `Agent` tool. Until then, contractor-persona fallback with `kasparov.md` content as prompt prefix.
+
+### 2026-04-17 — T1.4: `[trap: <slug>]` tag convention for 3-strike failure detection
+
+- **Why:** new `~/.local/bin/trap-detect` CLI scans every `™ progress.md` in the vault for `[trap: <slug>]` tags, aggregates by slug, and writes a ledger at `~/.claude/shared-memory/known-traps.md`. Slugs that hit threshold (default 3) get surfaced as "Active Traps" via the `/task-brief` skill banner on every (re-)invoke.
+- **Patched §6 in 9 specialist briefs** (Tier A workers + scribe special case): akbar, atelier, artemis, borges, garrus, gaming, mordin, services, scribe. Each `**Failures (if any):**` template line now carries a `[trap: <slug>] <description>` shape, with one prose instruction line under it: *"Slug is lowercase-kebab, specific enough to recur (e.g., `systemd-user-daemon-reload`, not `systemd-error`). Skip the tag entirely if the failure is genuinely one-off."*
+- **Skipped, with reason** — Tier B (charlotte: read-only, no Failures line); Tier A' (dexter, insights-sweep: append synthesis to `™ findings.md`, not session logs with failure bullets — possible future "Caveats" schema TBD); Tier C (rice-scout, health, reviewer, roster — same as T1.3 skips).
+- **Anomaly flagged:** curator, sys-optimizer, pitstop are listed as Tier A above but their `## Task-Brief Mode` sections contain no `**Failures (if any):**` line. T1.3 patches were tier-tuned heavily and may have dropped the bullet (pitstop is commit-only, sys-optimizer logs measurements, curator logs synthesis-style). **Backfill candidate** — confirm whether the bullet should exist in those three specialists; if yes, patch and re-run T1.4 propagation against them.
+- **Codification stays manual.** A trap surfacing in the ledger does not auto-write to CLAUDE.md or feedback memory. Ayaz says "codify `<slug>`" when ready; that's a separate human-in-the-loop step.
+- **Out of scope (V1.5+):** coordinators don't yet actively read `known-traps.md` at briefing time; cross-slug dedup; fuzzy-match fallback for untagged failures.
+
+### 2026-04-17 — T1.3b: coordinator task-brief emission wired
+
+- Added `## Task-Brief Emission` sections to all five coordinator identity specs in `~/.claude/shared-memory/` (oracle, alfred, scheherazade, house, elsa). Inline patch, placed after each identity's `Scribe + journal` section — sibling dispatch convention.
+- Common template (kickoff / emission / skip / task-switch), lightly tailored per coordinator: Oracle uses vault-project examples, Alfred uses system-project examples, Scheherazade uses STWork slugs, House flags the project-confusion failure mode explicitly (WC vs WC2 vs MMNV), Elsa hardcodes `iNiR/<slug>` since her domain is single-project.
+- Closes the T1.3 open gap. Consumers keep the warn-and-continue safety net; emission is now a documented coordinator behavior, not an implicit hope.
+
+### 2026-04-17 — Task-brief convention propagated roster-wide
+
+- Added `## Task-Brief Mode` sections to 14 agents across three tiers: 11 material workers (akbar, artemis, atelier, borges, curator, garrus, gaming, mordin, pitstop, services, sys-optimizer), 2 research synthesizers (dexter, insights-sweep), 1 read-only consumer (charlotte).
+- Intentionally skipped: rice-scout (web-only), health (stateless), reviewer (adversarial-charter preservation), roster (not invocable), scribe (already wired in its own §6).
+- Tuned append formats per role — atelier logs design moves, mordin logs xEdit decisions, sys-optimizer logs measurements, dexter appends to findings not progress, etc.
+- Closes the T1.1 integration gap from earlier today: the `/task-brief` skill scaffolds the triad, the verify-deliverables hook catches hallucinations, and now specialists actually consume and update the triad.
+- Flagged remaining gap: coordinators don't yet emit `task-brief:` lines by default.
 
 ### 2026-04-15 — Five-coordinator architecture; retire Texas Red
 

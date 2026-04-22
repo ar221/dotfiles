@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+tmux_cmd=(tmux)
+target_window=""
+
+if [[ "${1:-}" == "--socket" ]]; then
+  if [[ -z "${2:-}" ]]; then
+    printf 'error: missing socket name after --socket\n' >&2
+    exit 1
+  fi
+  socket="$2"
+  session="${3:-apollo}"
+  tmux_cmd=(tmux -L "$socket")
+  target_window="$session:0"
+elif [[ -n "${TMUX:-}" ]]; then
+  target_window="$(${tmux_cmd[@]} display-message -p '#{session_name}:#{window_index}')"
+else
+  printf 'error: run inside tmux, or pass --socket <name> [session]\n' >&2
+  exit 1
+fi
+
+run_tmux() {
+  "${tmux_cmd[@]}" "$@"
+}
+
+main_pane=""
+while IFS= read -r pane; do
+  pane_id="${pane%%$'\t'*}"
+  rest="${pane#*$'\t'}"
+  pane_title="${rest%%$'\t'*}"
+  pane_cmd="${rest##*$'\t'}"
+  if [[ "$pane_title" == "opencode" || "$pane_cmd" == "opencode" ]]; then
+    main_pane="$pane_id"
+    break
+  fi
+done < <(run_tmux list-panes -t "$target_window" -F '#{pane_id}	#{pane_title}	#{pane_current_command}')
+
+if [[ -z "$main_pane" ]]; then
+  main_pane="$(run_tmux list-panes -t "$target_window" -F '#{pane_id}' | head -n 1)"
+fi
+
+main_cwd="$(run_tmux display-message -p -t "$main_pane" '#{pane_current_path}')"
+
+while IFS= read -r pane_id; do
+  if [[ "$pane_id" != "$main_pane" ]]; then
+    run_tmux kill-pane -t "$pane_id"
+  fi
+done < <(run_tmux list-panes -t "$target_window" -F '#{pane_id}')
+
+run_tmux select-pane -t "$main_pane"
+run_tmux select-pane -T opencode
+
+run_tmux split-window -h -p 35 -t "$main_pane" -c "$main_cwd" \
+  "env APOLLO_ROLE=vault fish -C 'printf \"Vault pane ready. Use: oc-vault resolve <query>\\n\"'"
+vault_pane="$(run_tmux display-message -p -t "$target_window" '#{pane_id}')"
+run_tmux select-pane -t "$vault_pane"
+run_tmux select-pane -T vault
+
+run_tmux split-window -v -p 50 -t "$vault_pane" -c "$main_cwd" \
+  "env APOLLO_ROLE=log fish -C 'printf \"Log pane ready. Use: oc-vault context-push \\\"note\\\"\\n\"'"
+log_pane="$(run_tmux display-message -p -t "$target_window" '#{pane_id}')"
+run_tmux select-pane -t "$log_pane"
+run_tmux select-pane -T log
+
+run_tmux set -g @sidebar_open 0
+run_tmux set -g @copilot_open 0
+run_tmux set -g @rail_open 0
+run_tmux set -g @vault_open 1
+run_tmux set -g @log_open 1
+
+run_tmux select-pane -t "$main_pane"
+run_tmux display-message -t "$target_window" "Apollo: cockpit layout reset"

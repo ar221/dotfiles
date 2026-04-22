@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# apollo-launchpad — Constellation project picker.
+# Pipes apollo-projects through fzf with Apollo colors.
+# Prints selected path on stdout (empty on Esc).
+
+set -euo pipefail
+
+if ! command -v fzf &>/dev/null; then
+    printf '\033[38;2;255;90;78merror:\033[0m fzf not installed. run: sudo pacman -S fzf\n' >&2
+    exit 1
+fi
+
+if ! command -v apollo-projects &>/dev/null; then
+    printf '\033[38;2;255;90;78merror:\033[0m apollo-projects not on PATH\n' >&2
+    exit 1
+fi
+
+# Apollo palette — see ™ Apollo Flight-Deck 2026-04/™ Design Spec.md §5.1
+FZF_COLORS=(
+    "bg:#0E0B08"
+    "bg+:#2B1F10"
+    "fg:#F2E3C6"
+    "fg+:#FFB648"
+    "hl:#FFB648"
+    "hl+:#FFD080"
+    "pointer:#FFB648"
+    "marker:#A8C97B"
+    "prompt:#FFB648"
+    "info:#C9B28B"
+    "border:#5A4420"
+    "header:#C9B28B"
+    "spinner:#FFB648"
+)
+color_arg=$(IFS=,; echo "${FZF_COLORS[*]}")
+
+# Tab-separated name/path/status piped directly into fzf.
+# column(1) is intentionally absent — it mangles tabs, destroying field boundaries.
+# fzf uses tab as the delimiter; --with-nth displays all three columns;
+# --nth restricts search to name+path only. --tabstop=4 gives visual alignment.
+selected=$(
+    apollo-projects \
+        | fzf \
+            --ansi \
+            --prompt='▸ apollo · ' \
+            --header='LAUNCHPAD · type to filter · enter to launch · esc to cancel' \
+            --header-first \
+            --info=inline \
+            --border=rounded \
+            --margin=2 \
+            --padding=1 \
+            --height=100% \
+            --color="$color_arg" \
+            --delimiter=$'\t' \
+            --with-nth=1,2,3 \
+            --nth=1,2 \
+            --tabstop=4
+) || rc=$?
+
+# fzf exit codes: 0 = selected, 1 = no match, 130 = Esc/Ctrl-C, 2+ = actual error.
+# Silent-exit on 1 and 130; surface anything else.
+case "${rc-0}" in
+    0) ;;
+    1|130) exit 0 ;;
+    *)
+        printf '\033[38;2;255;90;78merror:\033[0m fzf exited with code %s\n' "$rc" >&2
+        exit "$rc"
+        ;;
+esac
+
+if [[ -z "$selected" ]]; then
+    exit 0
+fi
+
+# $selected is a single tab-separated line: "<name>\t<path>\t<status>".
+# cut -f2 extracts the path column, preserving any internal spaces.
+path=$(printf '%s' "$selected" | cut -f2)
+
+# Strip any leading/trailing whitespace (defensive).
+path="${path#"${path%%[![:space:]]*}"}"
+path="${path%"${path##*[![:space:]]}"}"
+
+if [[ -z "$path" ]]; then
+    exit 0
+fi
+
+# Expand leading ~ if present. Use case rather than eval — no shell injection.
+# shellcheck disable=SC2088
+case "$path" in
+    '~/'*) path="$HOME/${path#'~/'}" ;;
+    '~')   path="$HOME" ;;
+esac
+
+printf '%s\n' "$path"

@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+target_path="${1:-$PWD}"
+shift || true
+extra_args=("$@")
+
+if [[ -n "${TMUX:-}" ]]; then
+  exec oc-cockpit-reset-layout
+fi
+
+resolved_path="$(realpath "$target_path" 2>/dev/null || printf '%s' "$target_path")"
+slug="$(basename "$resolved_path" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')"
+if [[ -z "$slug" ]]; then
+  slug="home"
+fi
+
+socket="apollo-$slug"
+idx=2
+while tmux -L "$socket" has-session -t apollo 2>/dev/null; do
+  socket="apollo-$slug-$idx"
+  idx=$((idx + 1))
+done
+
+cmd="env APOLLO_ROLE=main opencode"
+for arg in "${extra_args[@]}"; do
+  printf -v esc '%q' "$arg"
+  cmd+=" $esc"
+done
+
+tmux -L "$socket" -f /home/ayaz/.config/tmux/apollo.conf \
+  new-session -d -s apollo -c "$resolved_path" "$cmd"
+
+/home/ayaz/.local/bin/oc-cockpit-reset-layout --socket "$socket" apollo
+
+exec tmux -L "$socket" attach -t apollo

@@ -5,7 +5,7 @@ description: >
   to record what happened, what changed, and what's left to do. Writes to the
   journal system. Do NOT trigger manually — the main Claude spawns this per the
   Coordinator Protocol in CLAUDE.md.
-model: haiku
+model: inherit
 color: white
 tools:
   - Bash
@@ -29,6 +29,7 @@ When spawned, you receive a briefing from the coordinator containing:
 - **Decisions made**: Architectural choices, tradeoffs picked
 - **Current status**: Done, in-progress, or blocked
 - **Remaining work**: What's left if incomplete
+- **Task brief (optional)**: A line of the form `task-brief: <project>/<slug>` — enables Task-Brief Mode (step 6 below)
 
 ## What You Do
 
@@ -125,6 +126,45 @@ scribe-vault-sync \
 - User explicitly said "don't log this."
 
 If the script fails or the vault isn't reachable (e.g., vault on a mount that's offline), log the failure in the journal entry but don't abort — the journal is the source of truth, the vault mirror is a convenience.
+
+### 6. Task-Brief Mode (if briefing contains `task-brief:`)
+
+If the briefing includes a line of the form `task-brief: <project>/<slug>`, **also** append a session entry to the task's progress file at:
+
+```
+~/Documents/Ayaz OS/03 Projects/<project>/™ tasks/<slug>/™ progress.md
+```
+
+This is in **addition** to the normal journal write — not a replacement. The journal captures what happened across the day; the task progress file captures what happened on this specific task.
+
+**Append format** (under the existing `## Sessions` heading):
+
+```markdown
+### HH:MM — <one-line session summary>
+
+**What was tried:**
+- <step 1>
+- <step 2>
+
+**Files changed:**
+- `path/to/file` -- <what changed>
+
+**Status:** in-progress | done | blocked
+
+**Failures (if any):**
+- [trap: <slug>] <failure 1, for 3-strike tracking>
+```
+
+Slug is lowercase-kebab, specific enough to recur (e.g., `systemd-user-daemon-reload`, not `systemd-error`). Skip the tag entirely if the failure is genuinely one-off.
+
+Also refresh the `updated:` timestamp in the progress.md frontmatter:
+
+```bash
+NOW="$(date -Iseconds)"
+sed -i "0,/^updated:.*/s|^updated:.*|updated: $NOW|" "$PROGRESS_FILE"
+```
+
+**If the task brief directory doesn't exist**, print a warning to stderr (`Task brief not found: <project>/<slug>`) and continue with only the normal journal write. Do **NOT** create the triad yourself — that's `/task-brief`'s job.
 
 ## Rules
 

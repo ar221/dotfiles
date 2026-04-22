@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+has_pane_title() {
+  tmux list-panes -F '#{pane_title}' | grep -Fxq "$1"
+}
+
+if has_pane_title "rail"; then
+  tmux kill-pane -t rail || true
+  tmux set -g @rail_open 0
+  tmux display-message "Apollo: rail closed"
+  exit 0
+fi
+
+cwd="$(tmux display-message -p '#{pane_current_path}')"
+tmux split-window -h -l 22% -c "$cwd" "apollo-rail"
+tmux select-pane -T rail
+tmux set -g @rail_open 1
+tmux select-pane -t '!'
+tmux display-message "Apollo: rail open"

@@ -19,6 +19,16 @@ This is a collaborative partnership, not a tool-and-operator relationship. Opera
 - **Bring energy.** Be genuinely engaged with the problem, not clinically detached.
 - **No yes-man behavior.** Agreement should be earned by good ideas, not given by default.
 
+### Model Routing (Claude + Codex)
+
+Claude remains the strategic coordinator by default. Codex is the preferred execution specialist when available.
+
+- **Claude-primary:** framing, planning, prioritization, voice-sensitive judgments, and final sign-off
+- **Codex-primary:** implementation, refactors, debugging, verification-heavy passes, and adversarial review
+- **Standard loop:** Claude frames -> Codex executes/tests -> Claude reviews and decides
+
+Skip the loop for trivial one-step tasks; just execute.
+
 ### User Profile
 
 Ayaz is an enthusiast learner with advanced Linux skills — not a professional developer, but potentially heading that direction. He's a power user who understands systems deeply but isn't steeped in professional dev workflows.
@@ -56,7 +66,6 @@ The scribe protocol and journal system (defined in `~/CLAUDE.md` Section 14) are
 |---------|-------------|-------|
 | Home base (system, dotfiles, coordination) | `~/` | `~/CLAUDE.md` |
 | SillyTavern / Creative / Roleplay | `~/STWork/` | `~/STWork/CLAUDE.md` |
-| ComfyUI / Image Generation | `~/ComfyWork/` | `~/ComfyWork/CLAUDE.md` |
 | Bethesda Game Modding | `~/Modding/` | `~/Modding/CLAUDE.md` |
 | Ayaz OS (second brain / life OS) | `~/Documents/Ayaz OS/` | `~/Documents/Ayaz OS/CLAUDE.md` |
 | Project-specific | `<project>/` | `<project>/CLAUDE.md` if it exists |
@@ -64,10 +73,6 @@ The scribe protocol and journal system (defined in `~/CLAUDE.md` Section 14) are
 ### Creative & Roleplay Sessions
 
 Roleplay and creative writing rules live in `~/STWork/`. Domain-specific rules (`Custom_rulesv4.md`, `impersonation_rulesv4.md`, `character-card-rules.md`) are loaded from `~/STWork/rules/`.
-
-### ComfyUI / Image Generation
-
-Image generation workspace lives in `~/ComfyWork/`. ComfyUI installed at `~/ComfyUI/`. Domain rules (`workflow-rules.md`, `prompt-rules.md`, `node-dev-rules.md`) loaded from `~/ComfyWork/rules/`.
 
 ### Bethesda Game Modding
 
@@ -102,7 +107,7 @@ A centralized memory system at `~/.claude/shared-memory/` provides cross-cutting
 
 **During work — before every memory write, run the Placement Test:**
 
-Ask: *Would a Claude instance in a different domain (STWork, Modding, ComfyWork, vault) benefit from this knowledge?*
+Ask: *Would a Claude instance in a different domain (STWork, Modding, vault) benefit from this knowledge?*
 
 - **Yes → write to `~/.claude/shared-memory/`.** The `shared/` symlink fans it out to every project automatically. No per-project duplication needed.
 - **No → write to the current project's local memory.** Domain-specific gotchas, workflows, and state stay local.

@@ -1,0 +1,7 @@
+# ~/.config/yazi-apollo/keymap.toml
+# Minimal — inherit yazi defaults, add one binding for clean pane exit.
+
+[[manager.prepend_keymap]]
+on   = "q"
+run  = 'shell "tmux kill-pane" --confirm'
+desc = "Close sidebar deck"

@@ -29,7 +29,7 @@ description: |
   user: "optimize proton settings for this game"
   <commentary>Gaming performance tuning — trigger gaming.</commentary>
   </example>
-model: sonnet
+model: inherit
 color: magenta
 tools: [Bash, Read, Glob, Grep, Write, Edit, Skill, Agent, WebSearch, WebFetch]
 ---
@@ -231,3 +231,26 @@ Links to ProtonDB, PCGamingWiki, and Steam pages.
 - For Steam games, prefer protontricks over manual prefix management
 - Back up prefixes before destructive changes: `cp -a prefix prefix.bak.$(date +%s)`
 - Don't install unnecessary winetricks — each verb bloats the prefix
+
+## Task-Brief Mode
+
+If the briefing contains `task-brief: <project>/<slug>`, **read** the triad at spawn for context:
+
+- `~/Documents/Ayaz OS/03 Projects/<project>/™ tasks/<slug>/™ plan.md`
+- `~/Documents/Ayaz OS/03 Projects/<project>/™ tasks/<slug>/™ findings.md`
+- `~/Documents/Ayaz OS/03 Projects/<project>/™ tasks/<slug>/™ progress.md`
+
+After prefix/launcher/Proton work, **append** a session entry under `## Sessions` in `™ progress.md`:
+
+```markdown
+### HH:MM — <e.g. "Set up GE-Proton prefix for Skyrim SE w/ dxvk + vcrun2019">
+**Prefix:** `<path>` | **Proton version:** <ver> | **Winetricks verbs:** <list>
+**Files changed:** `<path>` — <change>
+**Tested:** <launch verified, FPS/stability notes>
+**Status:** in-progress | done | blocked
+**Failures (if any):** [trap: <slug>] <what didn't launch, verbs that broke things>
+```
+
+Slug is lowercase-kebab, specific enough to recur (e.g., `proton-vcrun2019-fails-on-ge-9`, not `winetricks-fail`). Skip the tag entirely if the failure is genuinely one-off.
+
+Refresh `updated:` in frontmatter. If the triad dir is missing, warn and continue — don't scaffold.

@@ -1,0 +1,492 @@
+#!/usr/bin/env python3
+"""oc-vault: OpenCode bridge for Obsidian vault workflows."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import os
+import re
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import quote
+
+
+TM_MARK = "\u2122"
+VAULT_NAME = "Ayaz OS"
+VAULT_ROOT = Path.home() / "Documents" / "Ayaz OS"
+PROJECTS_ROOT = VAULT_ROOT / "03 Projects"
+CAPTURES_REL = Path(f"00 Notes/Inbox/{TM_MARK} OpenCode Captures.md")
+LOG_REL = Path(f"00 Notes/Inbox/{TM_MARK} OpenCode Log.md")
+
+
+@dataclass(frozen=True)
+class Candidate:
+    rel: Path
+    rank: int
+    ratio: float
+
+
+class ResolveError(RuntimeError):
+    pass
+
+
+class NoMatchError(ResolveError):
+    pass
+
+
+class AmbiguousMatchError(ResolveError):
+    def __init__(self, query: str, candidates: list[Candidate]):
+        self.query = query
+        self.candidates = candidates
+        super().__init__(query)
+
+
+def abort(message: str, code: int = 1) -> int:
+    print(f"error: {message}", file=sys.stderr)
+    return code
+
+
+def ensure_vault() -> None:
+    if not VAULT_ROOT.exists():
+        raise ResolveError(f"vault path not found: {VAULT_ROOT}")
+
+
+def normalize(text: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9]+", " ", text.lower())
+    return " ".join(cleaned.split())
+
+
+def all_markdown_relpaths() -> list[Path]:
+    rels: list[Path] = []
+    for path in VAULT_ROOT.rglob("*.md"):
+        if ".git" in path.parts or ".obsidian" in path.parts:
+            continue
+        rels.append(path.relative_to(VAULT_ROOT))
+    rels.sort(key=lambda p: p.as_posix().lower())
+    return rels
+
+
+def direct_relpath(query: str) -> Path | None:
+    q = query.strip()
+    if not q:
+        return None
+
+    # absolute path
+    q_path = Path(q).expanduser()
+    if q_path.is_absolute():
+        try:
+            rel = q_path.resolve().relative_to(VAULT_ROOT.resolve())
+        except Exception:
+            return None
+        if (VAULT_ROOT / rel).is_file() and rel.suffix.lower() == ".md":
+            return rel
+        return None
+
+    # vault-relative path
+    candidates = [VAULT_ROOT / q]
+    if not q.lower().endswith(".md"):
+        candidates.append(VAULT_ROOT / f"{q}.md")
+    for candidate in candidates:
+        if candidate.is_file() and candidate.suffix.lower() == ".md":
+            return candidate.relative_to(VAULT_ROOT)
+    return None
+
+
+def rank_candidate(query: str, rel: Path) -> Candidate | None:
+    import difflib
+
+    rel_text = rel.as_posix()
+    rel_no_ext = rel_text[:-3] if rel_text.lower().endswith(".md") else rel_text
+    base_stem = rel.stem
+
+    q_raw = query.strip()
+    q_stem = Path(q_raw).stem
+    q_raw_low = q_raw.lower()
+    rel_low = rel_text.lower()
+    rel_no_ext_low = rel_no_ext.lower()
+    base_low = base_stem.lower()
+
+    q_norm = normalize(q_raw)
+    rel_norm = normalize(rel_no_ext)
+    base_norm = normalize(base_stem)
+    tokens = q_norm.split()
+
+    if q_raw_low in {rel_low, rel_no_ext_low}:
+        return Candidate(rel=rel, rank=0, ratio=1.0)
+    if q_stem and q_stem.lower() == base_low:
+        return Candidate(rel=rel, rank=1, ratio=1.0)
+    if tokens and all(token in base_norm for token in tokens):
+        ratio = difflib.SequenceMatcher(None, q_norm, base_norm).ratio()
+        return Candidate(rel=rel, rank=2, ratio=ratio)
+    if tokens and all(token in rel_norm for token in tokens):
+        ratio = difflib.SequenceMatcher(None, q_norm, rel_norm).ratio()
+        return Candidate(rel=rel, rank=3, ratio=ratio)
+
+    if not q_norm:
+        return None
+    ratio = difflib.SequenceMatcher(None, q_norm, rel_norm).ratio()
+    if ratio >= 0.62:
+        return Candidate(rel=rel, rank=4, ratio=ratio)
+    return None
+
+
+def resolve_note(query: str, allow_first: bool = False) -> Path:
+    ensure_vault()
+    q = query.strip()
+    if not q:
+        raise ResolveError("query is empty")
+
+    direct = direct_relpath(q)
+    if direct is not None:
+        return direct
+
+    ranked: list[Candidate] = []
+    for rel in all_markdown_relpaths():
+        cand = rank_candidate(q, rel)
+        if cand is not None:
+            ranked.append(cand)
+
+    if not ranked:
+        raise NoMatchError(f"no note matches '{q}'")
+
+    ranked.sort(key=lambda c: (c.rank, -c.ratio, len(c.rel.as_posix()), c.rel.as_posix().lower()))
+    top = ranked[0]
+    ties = [
+        c
+        for c in ranked
+        if c.rank == top.rank and abs(c.ratio - top.ratio) < 1e-9
+    ]
+
+    if len(ties) > 1 and not allow_first:
+        raise AmbiguousMatchError(q, ties[:10])
+    return top.rel
+
+
+def ensure_note_file(path: Path, title: str, tags: str) -> None:
+    if path.exists():
+        return
+    today = dt.date.today().isoformat()
+    body = (
+        "---\n"
+        "type: note\n"
+        f"created: {today}\n"
+        f"updated: {today}\n"
+        f"tags: [{tags}]\n"
+        "---\n\n"
+        f"# {title}\n\n"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+
+
+def append_line(path: Path, line: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.write_text("", encoding="utf-8")
+    content = path.read_text(encoding="utf-8")
+    if content and not content.endswith("\n"):
+        content += "\n"
+    content += line.rstrip() + "\n"
+    path.write_text(content, encoding="utf-8")
+
+
+def log_action(action: str, detail: str) -> None:
+    note = VAULT_ROOT / LOG_REL
+    ensure_note_file(note, f"{TM_MARK} OpenCode Log", "opencode, log")
+    stamp = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    append_line(note, f"- `{stamp}` [{action}] {detail}")
+
+
+def daily_relpath(today: dt.date) -> Path:
+    year = today.strftime("%Y")
+    month_folder = today.strftime("%m %B")
+    filename = f"{TM_MARK} {today.isoformat()}.md"
+    return Path("01 Journals") / f"{year} Journals" / month_folder / filename
+
+
+def ensure_daily_template(path: Path, today: dt.date) -> None:
+    if path.exists():
+        return
+    day_name = today.strftime("%A")
+    header_date = today.strftime("%A, %B") + f" {today.day}, {today.year}"
+    template = (
+        "---\n"
+        f"date: {today.isoformat()}\n"
+        f"day: {day_name}\n"
+        "tags: [journal]\n"
+        "mood: \n"
+        "---\n\n"
+        f"# {header_date}\n"
+        "### *opencode*\n\n"
+        "---\n\n"
+        "## Morning\n\n"
+        "## Afternoon\n\n"
+        "## Evening\n\n"
+        "## Night\n\n"
+        "---\n\n"
+        "## Where This Lands\n\n"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(template, encoding="utf-8")
+
+
+def append_under_section(path: Path, section: str, line: str) -> None:
+    content = path.read_text(encoding="utf-8")
+    lines = content.splitlines()
+    idx = -1
+    for i, raw in enumerate(lines):
+        if raw.strip() == section:
+            idx = i
+            break
+    if idx == -1:
+        if lines and lines[-1].strip() != "":
+            lines.append("")
+        lines.extend([section, "", line, ""])
+    else:
+        insert_at = idx + 1
+        while insert_at < len(lines) and lines[insert_at].strip() == "":
+            insert_at += 1
+        lines.insert(insert_at, line)
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def obsidian_uri(rel: Path) -> str:
+    vault = quote(VAULT_NAME, safe="")
+    file_param = quote(rel.as_posix(), safe="")
+    return f"obsidian://open?vault={vault}&file={file_param}"
+
+
+def title_to_filename(title: str) -> str:
+    cleaned = title.strip()
+    cleaned = re.sub(r"[\\/]+", " - ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    if not cleaned:
+        raise ResolveError("title is empty")
+    if not cleaned.lower().endswith(".md"):
+        cleaned += ".md"
+    if not cleaned.startswith(f"{TM_MARK} "):
+        cleaned = f"{TM_MARK} {cleaned}"
+    return cleaned
+
+
+def resolve_project_dir(project_name: str) -> Path:
+    if not PROJECTS_ROOT.exists():
+        raise ResolveError(f"projects root not found: {PROJECTS_ROOT}")
+
+    direct = PROJECTS_ROOT / project_name
+    if direct.is_dir():
+        return direct
+
+    dirs = [d for d in PROJECTS_ROOT.iterdir() if d.is_dir()]
+    exact = [d for d in dirs if d.name.lower() == project_name.lower()]
+    if len(exact) == 1:
+        return exact[0]
+    if len(exact) > 1:
+        raise ResolveError("multiple project folders match; use exact folder name")
+
+    contains = [d for d in dirs if project_name.lower() in d.name.lower()]
+    if len(contains) == 1:
+        return contains[0]
+    if len(contains) > 1:
+        names = ", ".join(d.name for d in sorted(contains, key=lambda x: x.name.lower())[:8])
+        raise ResolveError(f"project name is ambiguous: {names}")
+
+    raise ResolveError(f"project not found: {project_name}")
+
+
+def handle_resolve(args: argparse.Namespace) -> int:
+    query = " ".join(args.query).strip()
+    rel = resolve_note(query, allow_first=args.first)
+    print(rel.as_posix())
+    return 0
+
+
+def handle_open(args: argparse.Namespace) -> int:
+    query = " ".join(args.query).strip()
+    rel = resolve_note(query, allow_first=args.first)
+    uri = obsidian_uri(rel)
+    proc = subprocess.run(["xdg-open", uri], check=False)
+    if proc.returncode != 0:
+        raise ResolveError("xdg-open failed to launch Obsidian URI")
+    log_action("open", rel.as_posix())
+    print(rel.as_posix())
+    return 0
+
+
+def handle_capture(args: argparse.Namespace) -> int:
+    text = " ".join(args.text).strip()
+    if not text:
+        raise ResolveError("capture text is empty")
+
+    note = VAULT_ROOT / CAPTURES_REL
+    ensure_note_file(note, f"{TM_MARK} OpenCode Captures", "opencode, inbox")
+
+    stamp = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    append_line(note, f"- `{stamp}` {text}")
+    log_action("capture", text)
+    print(CAPTURES_REL.as_posix())
+    return 0
+
+
+def handle_daily(args: argparse.Namespace) -> int:
+    today = dt.date.today()
+    rel = daily_relpath(today)
+    path = VAULT_ROOT / rel
+    ensure_daily_template(path, today)
+
+    if args.text:
+        text = " ".join(args.text).strip()
+        stamp = dt.datetime.now().strftime("%H:%M")
+        append_under_section(path, "## OpenCode", f"- `{stamp}` {text}")
+        log_action("daily", f"{rel.as_posix()} :: {text}")
+    else:
+        log_action("daily", f"{rel.as_posix()} :: ensured")
+    print(rel.as_posix())
+    return 0
+
+
+def handle_project_note(args: argparse.Namespace) -> int:
+    project_name = ""
+    title = ""
+
+    if args.project and args.title:
+        project_name = args.project.strip()
+        title = args.title.strip()
+    else:
+        raw = " ".join(args.parts).strip()
+        if "::" in raw:
+            left, right = raw.split("::", 1)
+            project_name, title = left.strip(), right.strip()
+        elif "|" in raw:
+            left, right = raw.split("|", 1)
+            project_name, title = left.strip(), right.strip()
+        elif len(args.parts) >= 2:
+            project_name = args.parts[0].strip()
+            title = " ".join(args.parts[1:]).strip()
+
+    if not project_name:
+        raise ResolveError("project name is empty")
+    if not title:
+        raise ResolveError("title is empty")
+
+    project_dir = resolve_project_dir(project_name)
+    filename = title_to_filename(title)
+    note_path = project_dir / filename
+
+    if not note_path.exists():
+        today = dt.date.today().isoformat()
+        body = (
+            "---\n"
+            "type: project-note\n"
+            f"project: {project_dir.name}\n"
+            f"created: {today}\n"
+            f"updated: {today}\n"
+            "tags: [opencode, notes]\n"
+            "---\n\n"
+            f"# {Path(filename).stem}\n\n"
+            "## Context\n\n"
+            "## Notes\n\n"
+            "## Next\n\n"
+        )
+        note_path.parent.mkdir(parents=True, exist_ok=True)
+        note_path.write_text(body, encoding="utf-8")
+
+    rel = note_path.relative_to(VAULT_ROOT)
+    log_action("project-note", rel.as_posix())
+    print(rel.as_posix())
+    return 0
+
+
+def handle_context_push(args: argparse.Namespace) -> int:
+    text = " ".join(args.text).strip() if args.text else "checkpoint"
+    cwd = Path.cwd()
+    log_action("context", f"{text} (`cwd: {cwd}`)")
+    print(LOG_REL.as_posix())
+    return 0
+
+
+def handle_link_here(args: argparse.Namespace) -> int:
+    query = " ".join(args.query).strip()
+    rel = resolve_note(query, allow_first=args.first)
+    target = rel.as_posix()
+    if target.lower().endswith(".md"):
+        target = target[:-3]
+    wikilink = f"[[{target}]]"
+
+    if sys.stdout.isatty() and os.environ.get("WAYLAND_DISPLAY"):
+        try:
+            subprocess.run(
+                ["wl-copy", "--trim-newline"],
+                input=wikilink.encode("utf-8"),
+                check=True,
+                timeout=1,
+            )
+        except (subprocess.SubprocessError, subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    print(wikilink)
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="OpenCode bridge to Obsidian vault")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_resolve = sub.add_parser("resolve", help="resolve a note path from query")
+    p_resolve.add_argument("query", nargs="+", help="note query")
+    p_resolve.add_argument("--first", action="store_true", help="choose top match when ambiguous")
+    p_resolve.set_defaults(func=handle_resolve)
+
+    p_open = sub.add_parser("open", help="resolve and open note in Obsidian")
+    p_open.add_argument("query", nargs="+", help="note query or path")
+    p_open.add_argument("--first", action="store_true", help="choose top match when ambiguous")
+    p_open.set_defaults(func=handle_open)
+
+    p_capture = sub.add_parser("capture", help="append text to captures note")
+    p_capture.add_argument("text", nargs="+", help="capture text")
+    p_capture.set_defaults(func=handle_capture)
+
+    p_daily = sub.add_parser("daily", help="create/append today's daily note")
+    p_daily.add_argument("text", nargs="*", help="optional note text")
+    p_daily.set_defaults(func=handle_daily)
+
+    p_project_note = sub.add_parser("project-note", help="create/open project note")
+    p_project_note.add_argument("--project", help="project folder name")
+    p_project_note.add_argument("--title", help="note title")
+    p_project_note.add_argument("parts", nargs="*", help="fallback: '<project> :: <title>'")
+    p_project_note.set_defaults(func=handle_project_note)
+
+    p_context = sub.add_parser("context-push", help="append session checkpoint to log")
+    p_context.add_argument("text", nargs="*", help="optional log text")
+    p_context.set_defaults(func=handle_context_push)
+
+    p_link = sub.add_parser("link-here", help="resolve and print wikilink")
+    p_link.add_argument("query", nargs="+", help="note query")
+    p_link.add_argument("--first", action="store_true", help="choose top match when ambiguous")
+    p_link.set_defaults(func=handle_link_here)
+
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        return args.func(args)
+    except AmbiguousMatchError as exc:
+        print(f"error: multiple notes match '{exc.query}'", file=sys.stderr)
+        for candidate in exc.candidates:
+            print(f"  - {candidate.rel.as_posix()}", file=sys.stderr)
+        print("hint: refine query or pass --first", file=sys.stderr)
+        return 3
+    except NoMatchError as exc:
+        return abort(str(exc), code=2)
+    except ResolveError as exc:
+        return abort(str(exc), code=1)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

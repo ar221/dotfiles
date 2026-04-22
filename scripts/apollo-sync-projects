@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""Generate Apollo launcher config and vault workspace notes from the registry."""
+
+from __future__ import annotations
+
+import sys
+import tomllib
+from pathlib import Path
+
+
+REGISTRY_PATH = Path("~/Documents/Ayaz OS/03 Projects/™ Workspace Registry.toml").expanduser()
+VAULT_PROJECTS_ROOT = REGISTRY_PATH.parent
+
+
+def expand_path(raw: str) -> Path:
+    return Path(raw).expanduser()
+
+
+def format_links(links: list[str]) -> str:
+    if not links:
+        return "- None recorded.\n"
+    return "".join(f"- `{link}`\n" for link in links)
+
+
+def direct_launch_line(entry: dict[str, object]) -> str:
+    path = str(entry["path"])
+    tool = str(entry.get("tool", "claude"))
+    if tool == "opencode":
+        return f"- Direct launch: `oc {path}`"
+    return f"- Direct launch: `claude {path}`"
+
+
+def write_workspace_note(entry: dict[str, object]) -> None:
+    if entry.get("kind") != "vault-project":
+        return
+
+    project_name = str(entry["project"])
+    project_dir = VAULT_PROJECTS_ROOT / project_name
+    if not project_dir.exists():
+        return
+
+    note_path = project_dir / "™ Workspace.md"
+    links = [str(link) for link in entry.get("links", [])]
+    content = f"""---
+type: workspace-link
+project: {project_name}
+workspace_key: {entry['key']}
+generated_by: apollo-sync-projects
+generated_from: [[™ Workspace Registry]]
+---
+
+# Workspace
+
+## Primary Root
+
+- Path: `{entry['path']}`
+- Tool: `{entry.get('tool', 'claude')}`
+- Coordinator: `{entry.get('coordinator', '')}`
+- Kind: `{entry.get('kind', '')}`
+- Track: `{entry.get('track', '')}`
+- Status: `{entry.get('status', '')}`
+
+## Launch
+
+- Default launcher: `deck`
+{direct_launch_line(entry)}
+
+## Twin Links
+
+{format_links(links)}
+## Notes
+
+- This file is generated from `03 Projects/™ Workspace Registry.toml`.
+- Edit the registry, then run `~/.local/bin/apollo-sync-projects` to refresh both launcher config and workspace notes.
+"""
+    note_path.write_text(content)
+
+
+def main() -> int:
+    if not REGISTRY_PATH.exists():
+        print(f"error: registry not found: {REGISTRY_PATH}", file=sys.stderr)
+        return 1
+
+    data = tomllib.loads(REGISTRY_PATH.read_text())
+    output_path = expand_path(data.get("generated_config", "~/.config/apollo/projects.toml"))
+    workspaces = data.get("workspace", [])
+
+    lines: list[str] = [
+        "# Generated from 03 Projects/™ Workspace Registry.toml",
+        f"# Source: {REGISTRY_PATH}",
+        "# Do not edit by hand; run ~/.local/bin/apollo-sync-projects instead.",
+        "",
+    ]
+
+    for entry in workspaces:
+        path = expand_path(entry["path"])
+        if not path.exists():
+            continue
+        write_workspace_note(entry)
+        lines.extend(
+            [
+                "[[project]]",
+                f'name = "{entry["name"].replace("\"", "\\\"")}"',
+                f'path = "{entry["path"]}"',
+                f'tool = "{entry.get("tool", "claude")}"',
+                f'coordinator = "{entry.get("coordinator", "")}"',
+                f'kind = "{entry.get("kind", "")}"',
+                f'status = "{entry.get("status", "")}"',
+                "",
+            ]
+        )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("\n".join(lines).rstrip() + "\n")
+    print(output_path)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

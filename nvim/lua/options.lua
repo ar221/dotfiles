@@ -16,4 +16,6 @@ o.softtabstop = 4
 
 set.swapfile = false
 set.title = true
-set.foldexpr = "nvim_treesitter#foldexpr()"
+set.foldmethod = "expr"
+set.foldexpr = "v:lua.vim.treesitter.foldexpr()"
+set.foldlevel = 99

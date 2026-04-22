@@ -2,8 +2,9 @@ return {
   {
     "stevearc/conform.nvim",
     event = "BufWritePre",
-    config = function()
-      require("configs.conform")
+    opts = require "configs.conform",
+    config = function(_, opts)
+      require("conform").setup(opts)
     end,
   },
 
@@ -22,6 +23,7 @@ return {
   { import = "plugins.ui.noice" },
   { import = "plugins.ui.which-key" },
   { import = "plugins.ui.todo-comments" },
+  { import = "plugins.obsidian" },
 
 
 

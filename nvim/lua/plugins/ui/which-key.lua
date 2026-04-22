@@ -8,6 +8,12 @@ return {
   },
   config = function(_, opts)
     dofile(vim.g.base46_cache .. "whichkey")
-    require("which-key").setup(opts)
+    local wk = require("which-key")
+
+    wk.setup(opts)
+    wk.add({
+      { "<leader>o", group = "vault" },
+      { "<leader>oj", group = "journal" },
+    })
   end,
 }

@@ -331,6 +331,106 @@ def handle_capture(args: argparse.Namespace) -> int:
     return 0
 
 
+def _briefing_serious_drift() -> list[str]:
+    """Check serious-track projects for days-since-last-touch."""
+    import tomllib
+
+    registry_path = VAULT_ROOT / "03 Projects" / f"{TM_MARK} Workspace Registry.toml"
+    if not registry_path.exists():
+        return ["  ⚠ Workspace Registry not found"]
+
+    try:
+        data = tomllib.loads(registry_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        return [f"  ⚠ Could not parse registry: {e}"]
+
+    workspaces = data.get("workspace", [])
+    serious = [w for w in workspaces if w.get("track") == "serious"]
+    if not serious:
+        return ["  (no serious-track projects)"]
+
+    today = dt.date.today()
+    lines: list[str] = []
+    for ws in serious:
+        name = ws.get("name", ws.get("key", "?"))
+        proj = ws.get("project", "")
+        status = ws.get("status", "?")
+
+        # Find most-recent mtime across project files
+        search_roots: list[Path] = []
+        proj_dir = PROJECTS_ROOT / proj if proj else None
+        if proj_dir and proj_dir.is_dir():
+            search_roots.append(proj_dir)
+
+        latest_mtime: dt.date | None = None
+        for root in search_roots:
+            for f in root.rglob("*.md"):
+                try:
+                    mtime = dt.date.fromtimestamp(f.stat().st_mtime)
+                    if latest_mtime is None or mtime > latest_mtime:
+                        latest_mtime = mtime
+                except OSError:
+                    pass
+
+        if latest_mtime:
+            days = (today - latest_mtime).days
+            drift = f"{days}d since last touch" if days > 0 else "touched today"
+            flag = " 🚨" if days >= 2 else ""
+            lines.append(f"  - **{proj or name}** ({status}) — {drift}{flag}")
+        else:
+            lines.append(f"  - **{proj or name}** ({status}) — no files found")
+
+    return lines
+
+
+def _briefing_inbox_counts() -> tuple[int, int]:
+    """Return (oracle_inbox_entries, alfred_inbox_entries)."""
+    oracle_inbox = VAULT_ROOT / "00 Notes" / "Inbox" / f"{TM_MARK} hermes inbox.md"
+    alfred_inbox = Path.home() / ".claude" / "shared-memory" / "hermes-inbox-alfred.md"
+
+    def count_oracle(path: Path) -> int:
+        """Oracle inbox: count all ## headers (no marker, entries start from top)."""
+        if not path.exists():
+            return 0
+        content = path.read_text(encoding="utf-8")
+        return sum(1 for line in content.splitlines() if line.startswith("## "))
+
+    def count_alfred(path: Path) -> int:
+        """Alfred inbox: count ## headers after the entries marker."""
+        if not path.exists():
+            return 0
+        marker = "<!-- entries below this line -->"
+        content = path.read_text(encoding="utf-8")
+        idx = content.find(marker)
+        if idx == -1:
+            return 0
+        below = content[idx + len(marker):]
+        return sum(1 for line in below.splitlines() if line.startswith("## "))
+
+    return count_oracle(oracle_inbox), count_alfred(alfred_inbox)
+
+
+def _briefing_goals_headline() -> str:
+    """Extract the first non-empty line under ## The Goal from GOALS.md."""
+    goals_path = VAULT_ROOT / "GOALS.md"
+    if not goals_path.exists():
+        return "(GOALS.md not found)"
+    content = goals_path.read_text(encoding="utf-8")
+    in_section = False
+    for line in content.splitlines():
+        if line.strip() == "## The Goal":
+            in_section = True
+            continue
+        if in_section:
+            if line.startswith("## "):
+                break
+            # Strip markdown bold/italic markers
+            stripped = re.sub(r"\*{1,3}|_{1,3}", "", line).strip()
+            if stripped:
+                return stripped
+    return "(could not parse GOALS.md)"
+
+
 def handle_daily(args: argparse.Namespace) -> int:
     today = dt.date.today()
     rel = daily_relpath(today)
@@ -338,13 +438,47 @@ def handle_daily(args: argparse.Namespace) -> int:
     ensure_daily_template(path, today)
 
     if args.text:
+        # Append mode — timestamped line under ## OpenCode
         text = " ".join(args.text).strip()
         stamp = dt.datetime.now().strftime("%H:%M")
         append_under_section(path, "## OpenCode", f"- `{stamp}` {text}")
         log_action("daily", f"{rel.as_posix()} :: {text}")
+        print(rel.as_posix())
     else:
-        log_action("daily", f"{rel.as_posix()} :: ensured")
-    print(rel.as_posix())
+        # Briefing mode — surface vault state into chat
+        log_action("daily", f"{rel.as_posix()} :: briefing")
+
+        oracle_count, alfred_count = _briefing_inbox_counts()
+        goal = _briefing_goals_headline()
+        drift_lines = _briefing_serious_drift()
+        day_str = today.strftime("%A, %B %-d, %Y")
+
+        lines: list[str] = [
+            f"## Morning Briefing — {day_str}",
+            "",
+            f"**Journal:** `{rel.as_posix()}`",
+            "",
+            f"**Goal:** {goal}",
+            "",
+            "**Serious track:**",
+        ]
+        lines.extend(drift_lines)
+        lines.append("")
+
+        inbox_parts: list[str] = []
+        if oracle_count > 0:
+            inbox_parts.append(f"Oracle inbox: **{oracle_count}** pending")
+        if alfred_count > 0:
+            inbox_parts.append(f"Alfred inbox: **{alfred_count}** pending")
+        if inbox_parts:
+            lines.append("**Inboxes:** " + " · ".join(inbox_parts))
+        else:
+            lines.append("**Inboxes:** all clear")
+        lines.append("")
+        lines.append("*Type `/daily <note>` to append to today's journal.*")
+
+        print("\n".join(lines))
+
     return 0
 
 

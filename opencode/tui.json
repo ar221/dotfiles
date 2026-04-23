@@ -2,15 +2,14 @@
   "$schema": "https://opencode.ai/tui.json",
   "theme": "cockpit",
   "plugin_enabled": {
-    "internal:sidebar-context": false,
+    "internal:sidebar-context": true,
+    "internal:sidebar-footer": true,
     "internal:sidebar-mcp": false,
     "internal:sidebar-lsp": false,
     "internal:sidebar-todo": false,
-    "internal:sidebar-files": false,
-    "internal:sidebar-footer": false
+    "internal:sidebar-files": false
   },
   "keybinds": {
-    "sidebar_toggle": "none",
     "status_view": "none"
   }
 }

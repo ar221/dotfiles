@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""
+opencode-drift-audit — compare OpenCode agent model bindings against the
+expected-models manifest. Flags:
+  - Agents present in manifest but missing in agents dir.
+  - Agents present in agents dir but not in manifest.
+  - Agents whose frontmatter `model:` doesn't match the manifest.
+  - opencode.json top-level `model` / `small_model` if they diverge from the
+    canonical pair (openai-codex-proxy/gpt-5.5 + openai-codex-proxy/gpt-5.4-mini).
+
+Exit code:
+  0 — clean (manifest and live state agree).
+  1 — drift detected (details printed to stdout).
+  2 — environment error (missing files, unreadable manifest, etc.).
+
+Silence-is-golden on exit 0 by default — designed for cron. Pass --verbose to
+print the confirmed-clean summary even when nothing drifted.
+
+Usage:
+  opencode-drift-audit                    # default paths
+  opencode-drift-audit --verbose
+  opencode-drift-audit --manifest PATH --agents-dir PATH --config PATH
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+try:
+    import yaml
+except ImportError:
+    print("error: PyYAML not installed. Install with: pip install pyyaml", file=sys.stderr)
+    sys.exit(2)
+
+DEFAULT_MANIFEST = Path.home() / "Github/dotfiles/opencode/manifests/expected-models.yaml"
+DEFAULT_AGENTS_DIR = Path.home() / ".config/opencode/agents"
+DEFAULT_CONFIG = Path.home() / ".config/opencode/opencode.json"
+EXPECTED_DEFAULT_MODEL = "openai-codex-proxy/gpt-5.5"
+EXPECTED_SMALL_MODEL = "openai-codex-proxy/gpt-5.4-mini"
+
+
+def extract_frontmatter_model(path: Path) -> str | None:
+    """Return the `model:` value from a markdown file's YAML frontmatter, or None."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    if not text.startswith("---"):
+        return None
+    # frontmatter ends at the next standalone `---`
+    end = text.find("\n---", 3)
+    if end == -1:
+        return None
+    fm_raw = text[3:end].strip("\n")
+    for line in fm_raw.splitlines():
+        m = re.match(r"^model:\s*(\S+)\s*$", line)
+        if m:
+            return m.group(1)
+    return None
+
+
+def load_manifest(path: Path) -> dict[str, str]:
+    with path.open() as f:
+        doc = yaml.safe_load(f)
+    agents = doc.get("agents") if isinstance(doc, dict) else None
+    if not isinstance(agents, dict):
+        raise ValueError(f"Manifest {path} missing 'agents:' mapping")
+    return {str(k): str(v) for k, v in agents.items()}
+
+
+def scan_agents_dir(path: Path) -> dict[str, str | None]:
+    """Return {agent_name: model_str_or_None} for every *.md in the dir."""
+    out: dict[str, str | None] = {}
+    for md in sorted(path.glob("*.md")):
+        name = md.stem
+        # Skip disabled variants (e.g. orchestrator.md.disabled)
+        if md.suffix != ".md":
+            continue
+        out[name] = extract_frontmatter_model(md)
+    return out
+
+
+def read_config_defaults(path: Path) -> tuple[str | None, str | None]:
+    try:
+        with path.open() as f:
+            doc = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None, None
+    return doc.get("model"), doc.get("small_model")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    ap.add_argument("--agents-dir", type=Path, default=DEFAULT_AGENTS_DIR)
+    ap.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    ap.add_argument("--verbose", action="store_true")
+    args = ap.parse_args()
+
+    if not args.manifest.is_file():
+        print(f"error: manifest not found: {args.manifest}", file=sys.stderr)
+        return 2
+    if not args.agents_dir.is_dir():
+        print(f"error: agents dir not found: {args.agents_dir}", file=sys.stderr)
+        return 2
+
+    try:
+        expected = load_manifest(args.manifest)
+    except (yaml.YAMLError, ValueError) as e:
+        print(f"error: manifest parse failed: {e}", file=sys.stderr)
+        return 2
+
+    live = scan_agents_dir(args.agents_dir)
+    cfg_default, cfg_small = read_config_defaults(args.config)
+
+    issues: list[str] = []
+
+    # Missing: in manifest, not on disk
+    for name in sorted(set(expected) - set(live)):
+        issues.append(f"MISSING  {name}: manifest expects {expected[name]}, no file in agents dir")
+
+    # Orphans: on disk, not in manifest
+    for name in sorted(set(live) - set(expected)):
+        model = live[name] or "(no model in frontmatter)"
+        issues.append(f"ORPHAN   {name}: live={model}, not in manifest")
+
+    # Mismatches
+    for name in sorted(set(expected) & set(live)):
+        want = expected[name]
+        got = live[name]
+        if got is None:
+            issues.append(f"INVALID  {name}: no model: line in frontmatter")
+        elif got != want:
+            issues.append(f"DRIFT    {name}: manifest={want}, live={got}")
+
+    # opencode.json top-level
+    if cfg_default and cfg_default != EXPECTED_DEFAULT_MODEL:
+        issues.append(f"DRIFT    opencode.json.model: expected={EXPECTED_DEFAULT_MODEL}, live={cfg_default}")
+    if cfg_small and cfg_small != EXPECTED_SMALL_MODEL:
+        issues.append(f"DRIFT    opencode.json.small_model: expected={EXPECTED_SMALL_MODEL}, live={cfg_small}")
+
+    if issues:
+        print(f"opencode-drift-audit: {len(issues)} issue(s)")
+        for line in issues:
+            print(f"  {line}")
+        return 1
+
+    if args.verbose:
+        total = len(expected)
+        print(f"opencode-drift-audit: clean — {total} agents aligned with manifest")
+        print(f"  default={cfg_default}  small={cfg_small}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

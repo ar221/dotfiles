@@ -1,0 +1,60 @@
+# OpenCode agent → expected model manifest
+# Authoritative post-routing-rollout-v2 state.
+# Consumed by ~/.local/bin/opencode-drift-audit (weekly Hermes cron).
+# Update this file whenever an agent's intended model changes. If the live
+# frontmatter differs from this manifest, the audit flags it as drift.
+#
+# Governing principle: capability-matched routing (best tool for the job).
+# Codex default (gpt-5.5) for execution; Claude retained for taste-heavy
+# escalation variants (*-claude) and specific exemptions (kasparov Opus,
+# reviewer Sonnet, insights-sweep Sonnet).
+
+agents:
+  # Coordinators — Codex primary
+  alfred: openai-codex-proxy/gpt-5.5
+  oracle: openai-codex-proxy/gpt-5.5
+  elsa: openai-codex-proxy/gpt-5.5
+  scheherazade: openai-codex-proxy/gpt-5.5
+  house: openai-codex-proxy/gpt-5.5
+  charlotte: openai-codex-proxy/gpt-5.5
+  atelier: openai-codex-proxy/gpt-5.5
+
+  # Coordinator Claude escalation variants
+  alfred-claude: claude-proxy/claude-sonnet-4-6
+  oracle-claude: claude-proxy/claude-sonnet-4-6
+  elsa-claude: claude-proxy/claude-sonnet-4-6
+  scheherazade-claude: claude-proxy/claude-sonnet-4-6
+  house-claude: claude-proxy/claude-sonnet-4-6
+  charlotte-claude: claude-proxy/claude-sonnet-4-6
+  atelier-claude: claude-proxy/claude-sonnet-4-6
+
+  # Execution + maintenance specialists (Phase 3a)
+  akbar: openai-codex-proxy/gpt-5.5
+  garrus: openai-codex-proxy/gpt-5.5
+  curator: openai-codex-proxy/gpt-5.5
+  pitstop: openai-codex-proxy/gpt-5.5
+  sys-optimizer: openai-codex-proxy/gpt-5.5
+  borges: openai-codex-proxy/gpt-5.5
+  services: openai-codex-proxy/gpt-5.4-mini
+  health: openai-codex-proxy/gpt-5.4-mini
+
+  # Scribe (Phase 3b canary-passed)
+  scribe: openai-codex-proxy/gpt-5.4-mini
+
+  # Domain specialists (Phase 4a)
+  mordin: openai-codex-proxy/gpt-5.5
+  artemis: openai-codex-proxy/gpt-5.5
+  dexter: openai-codex-proxy/gpt-5.5
+  rice-scout: openai-codex-proxy/gpt-5.5
+  gaming: openai-codex-proxy/gpt-5.5
+
+  # Explicit Claude-side exemptions
+  kasparov: claude-proxy/claude-opus-4-7       # P4b flagship — trading archive ceiling
+  reviewer: claude-proxy/claude-sonnet-4-6      # P3c — cross-provider adversarial diversity
+  insights-sweep: claude-proxy/claude-sonnet-4-6  # not yet scoped; reader-role pattern-mining
+
+# Notes:
+# - The default model in ~/.config/opencode/opencode.json is openai-codex-proxy/gpt-5.5
+#   and small_model is openai-codex-proxy/gpt-5.4-mini — drift audit can read those too.
+# - Any agent present in ~/.config/opencode/agents/ but absent from this manifest = drift.
+# - Any manifest entry whose frontmatter doesn't match the declared model = drift.

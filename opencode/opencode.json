@@ -1,6 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "openai/gpt-5.4",
+  "model": "claude-proxy/claude-sonnet-4-6",
   "small_model": "claude-proxy/claude-haiku-4-5-20251001",
   "autoupdate": "notify",
   "provider": {
@@ -9,7 +9,7 @@
       "name": "Claude (via STWork proxy)",
       "options": {
         "baseURL": "http://localhost:42069/v1",
-        "apiKey": "proxy-ignored"
+        "apiKey": "***"
       },
       "models": {
         "claude-opus-4-7": {
@@ -69,13 +69,155 @@
           }
         }
       }
+    },
+    "openai-codex-proxy": {
+      "npm": "@ai-sdk/openai",
+      "name": "OpenAI Codex (via local OAuth proxy)",
+      "options": {
+        "baseURL": "http://127.0.0.1:10531/v1",
+        "apiKey": "not-needed"
+      },
+      "models": {
+        "gpt-5.5": {
+          "name": "GPT-5.5",
+          "limit": {
+            "context": 272000,
+            "output": 8192
+          }
+        },
+        "gpt-5.4": {
+          "name": "GPT-5.4",
+          "limit": {
+            "context": 272000,
+            "output": 8192
+          }
+        },
+        "gpt-5.4-mini": {
+          "name": "GPT-5.4 Mini",
+          "limit": {
+            "context": 272000,
+            "output": 8192
+          }
+        },
+        "gpt-5.3-codex": {
+          "name": "GPT-5.3 Codex",
+          "limit": {
+            "context": 272000,
+            "output": 8192
+          }
+        },
+        "gpt-5.3-codex-spark": {
+          "name": "GPT-5.3 Codex Spark",
+          "limit": {
+            "context": 128000,
+            "output": 8192
+          }
+        },
+        "gpt-5.2": {
+          "name": "GPT-5.2",
+          "limit": {
+            "context": 272000,
+            "output": 8192
+          }
+        },
+        "codex-auto-review": {
+          "name": "Codex Auto Review",
+          "limit": {
+            "context": 272000,
+            "output": 8192
+          }
+        }
+      }
     }
   },
   "instructions": [
-    "~/.claude/shared-memory/user-profile.md",
-    "~/.claude/shared-memory/user-preferences.md",
-    "~/.claude/shared-memory/system-context.md"
+    "~/.claude/shared-memory/opencode-mobile-context.md"
   ],
+  "mcp": {
+    "vault": {
+      "type": "local",
+      "command": [
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/home/ayaz/Documents/Ayaz OS"
+      ],
+      "enabled": true,
+      "timeout": 15000
+    },
+    "projects": {
+      "type": "local",
+      "command": [
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/home/ayaz/Github"
+      ],
+      "enabled": true,
+      "timeout": 15000
+    },
+    "stwork": {
+      "type": "local",
+      "command": [
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/home/ayaz/STWork"
+      ],
+      "enabled": true,
+      "timeout": 15000
+    },
+    "modding": {
+      "type": "local",
+      "command": [
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/home/ayaz/Modding"
+      ],
+      "enabled": true,
+      "timeout": 15000
+    },
+    "scripts": {
+      "type": "local",
+      "command": [
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/home/ayaz/.local/bin"
+      ],
+      "enabled": true,
+      "timeout": 15000
+    },
+    "github": {
+      "type": "local",
+      "command": [
+        "bash",
+        "-lc",
+        "GITHUB_PERSONAL_ACCESS_TOKEN=\"$(gh auth token)\" exec npx -y @modelcontextprotocol/server-github"
+      ],
+      "enabled": true,
+      "timeout": 20000
+    },
+    "browser": {
+      "type": "local",
+      "command": [
+        "npx",
+        "-y",
+        "@playwright/mcp",
+        "--headless",
+        "--isolated",
+        "--caps",
+        "vision,pdf,devtools",
+        "--timeout-action",
+        "10000",
+        "--timeout-navigation",
+        "60000"
+      ],
+      "enabled": true,
+      "timeout": 120000
+    }
+  },
   "permission": {
     "edit": "allow",
     "bash": {
@@ -107,5 +249,367 @@
   "share": "disabled",
   "plugin": [
     "@iam-brain/opencode-codex-auth@latest"
-  ]
+  ],
+  "agent": {
+    "alfred": {
+      "model": "claude-proxy/claude-sonnet-4-6",
+      "temperature": 0.2,
+      "prompt": "{file:/home/ayaz/.claude/agents/alfred.md}\n\n## OpenCode-specific notes\n\nYou are running under OpenCode, not Claude Code. Tool names are lowercase (`bash`, `read`, `write`, `edit`, `glob`, `grep`). Use MCP tools when they are the best fit (vault, projects, stwork, modding, scripts, github, browser). The `Task` tool equivalent for spawning separate subagents is not available unless OpenCode explicitly exposes agent orchestration in this session, so default to operating solo within this invocation.\n",
+      "description": "Home-base system steward and operator. Invoke when you need Alfred explicitly inside an agent-capable harness: system-side judgment, dotfiles/service/script implications, theming-pipeline ripple, operational cleanup, and sober implementation planning for the machine layer. This is the invocable bridge form of Alfred \u2014 separate from the launch-directory identity overlay. <example> user: \"@alfred what are the system implications of turning OpenCode into a primary cockpit?\" <commentary>Alfred reads the tooling stack, identifies the substrate changes, and returns the ops view.</commentary> </example> <example> user: \"@alfred tighten this launcher/doc/tooling setup without breaking the house.\" <commentary>Alfred proposes the minimum-invasive system pass and flags the real risks.</commentary> </example> <example> user: \"@alfred does this belong in dotfiles, the vault, or shared-memory?\" <commentary>Alfred answers from source-of-truth and execution-root discipline.</commentary> </example>",
+      "mode": "subagent",
+      "color": "#5b88c9",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "allow"
+      },
+      "name": "alfred",
+      "options": {}
+    },
+    "oracle": {
+      "model": "claude-proxy/claude-sonnet-4-6",
+      "temperature": 0.2,
+      "prompt": "{file:/home/ayaz/.claude/agents/oracle.md}\n\n## OpenCode-specific notes\n\nYou are running under OpenCode, not Claude Code. Tool names are lowercase (`bash`, `read`, `write`, `edit`, `glob`, `grep`). Use MCP tools when they are the best fit (vault, projects, stwork, modding, scripts, github, browser). The `Task` tool equivalent for spawning separate subagents is not available unless OpenCode explicitly exposes agent orchestration in this session, so default to operating solo within this invocation.\n",
+      "description": "Vault-level chief of staff and strategic coordinator. Invoke when you need Oracle's portfolio view explicitly inside an agent-capable harness: serious-vs-fun track enforcement, project sequencing, cross-domain ripple mapping, and strategic reads on what matters next. This is the invocable bridge form of Oracle \u2014 separate from the launch-directory identity overlay. <example> user: \"@oracle help me structure the next 3 moves for Job Hunt without letting iNiR sprawl eat the week.\" <commentary>Oracle reads the current project state, applies two-track discipline, and returns a strategic sequence.</commentary> </example> <example> user: \"@oracle this project feels exciting but I'm not sure if it's serious or fun. Call it.\" <commentary>Oracle weighs declared intent, deadlines, and portfolio consequences, then classifies or asks the one necessary clarifying question.</commentary> </example> <example> user: \"@oracle what's the real priority across Clocktower, Job Hunt, and STWork this week?\" <commentary>Oracle returns the portfolio read, not implementation details.</commentary> </example>",
+      "mode": "subagent",
+      "color": "#8f6bd8",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "allow"
+      },
+      "name": "oracle",
+      "options": {}
+    },
+    "elsa": {
+      "model": "claude-proxy/claude-sonnet-4-6",
+      "temperature": 0.2,
+      "prompt": "{file:/home/ayaz/.claude/shared-memory/elsa-identity.md}\n\n## OpenCode bridge notes\n\nIn Claude Code, this identity is normally applied by launch directory rather than invoked as a subagent. Inside OpenCode, you are exposed as a summonable bridge agent so Ayaz can explicitly call you from any workspace. Stay in-lane for your identity and consult rather than overreach into other domains.\nUse MCP tools when they are the best fit (vault, projects, stwork, modding, scripts, github, browser).\n",
+      "description": "iNiR taste-holder. UX/design cohesion, campaign framing, retrofuturism \u00d7 modern flair.",
+      "mode": "subagent",
+      "color": "#59a6d9",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "allow"
+      },
+      "name": "elsa",
+      "options": {}
+    },
+    "scheherazade": {
+      "model": "claude-proxy/claude-sonnet-4-6",
+      "temperature": 0.2,
+      "prompt": "{file:/home/ayaz/.claude/shared-memory/scheherazade-identity.md}\n\n## OpenCode bridge notes\n\nIn Claude Code, this identity is normally applied by launch directory rather than invoked as a subagent. Inside OpenCode, you are exposed as a summonable bridge agent so Ayaz can explicitly call you from any workspace. Stay in-lane for your identity and consult rather than overreach into other domains.\nUse MCP tools when they are the best fit (vault, projects, stwork, modding, scripts, github, browser).\n",
+      "description": "STWork narrative coordinator. Character voice, lorebooks, creative accumulation, SillyTavern craft.",
+      "mode": "subagent",
+      "color": "#b86bb5",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "allow"
+      },
+      "name": "scheherazade",
+      "options": {}
+    },
+    "house": {
+      "model": "claude-proxy/claude-sonnet-4-6",
+      "temperature": 0.2,
+      "prompt": "{file:/home/ayaz/.claude/shared-memory/house-identity.md}\n\n## OpenCode bridge notes\n\nIn Claude Code, this identity is normally applied by launch directory rather than invoked as a subagent. Inside OpenCode, you are exposed as a summonable bridge agent so Ayaz can explicitly call you from any workspace. Stay in-lane for your identity and consult rather than overreach into other domains.\nUse MCP tools when they are the best fit (vault, projects, stwork, modding, scripts, github, browser).\n",
+      "description": "Modding coordinator. Wild Card/WC2/MMNV scope control, plugin-budget governance, campaign sequencing.",
+      "mode": "subagent",
+      "color": "#7aa84f",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "allow"
+      },
+      "name": "house",
+      "options": {}
+    },
+    "akbar": {
+      "model": "claude-proxy/claude-sonnet-4-6",
+      "temperature": 0.2,
+      "prompt": "{file:/home/ayaz/.claude/agents/akbar.md}\n\n## OpenCode-specific notes\n\nYou are running under OpenCode, not Claude Code. Tool names are lowercase (`bash`, `read`, `write`, `edit`, `glob`, `grep`). Use MCP tools when they are the best fit (vault, projects, stwork, modding, scripts, github, browser). The `Task` tool equivalent for spawning separate subagents is not available unless OpenCode explicitly exposes agent orchestration in this session, so default to operating solo within this invocation.\n",
+      "description": "System administration agent for CachyOS/Arch Linux. Use for: managing systemd services and timers, writing shell scripts, troubleshooting system issues, package management, dotfiles sync, automated maintenance, security audits. <example> user: \"set up a backup timer\" <commentary>Systemd timer creation \u2014 trigger sysadmin.</commentary> </example> <example> user: \"why is my GPU thermal throttling\" <commentary>System troubleshooting \u2014 trigger sysadmin.</commentary> </example> <example> user: \"create a script to check for config drift\" <commentary>Script creation following established patterns \u2014 trigger sysadmin.</commentary> </example> <example> user: \"audit orphan packages and clean them up\" <commentary>Package management task \u2014 trigger sysadmin.</commentary> </example>",
+      "mode": "subagent",
+      "color": "#4f8aa8",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "allow"
+      },
+      "name": "akbar",
+      "options": {}
+    },
+    "artemis": {
+      "model": "claude-proxy/claude-sonnet-4-6",
+      "temperature": 0.2,
+      "prompt": "{file:/home/ayaz/.claude/agents/artemis.md}\n\n## OpenCode-specific notes\n\nYou are running under OpenCode, not Claude Code. Tool names are lowercase (`bash`, `read`, `write`, `edit`, `glob`, `grep`). Use MCP tools when they are the best fit (vault, projects, stwork, modding, scripts, github, browser). The `Task` tool equivalent for spawning separate subagents is not available unless OpenCode explicitly exposes agent orchestration in this session, so default to operating solo within this invocation.\n",
+      "description": "QML, Quickshell, and Python specialist for iNiR desktop shell work and adjacent Qt ecosystem tooling. Use for: writing/editing QML modules, services, and panels; debugging Quickshell crashes, hot-reload issues, and property-binding loops; theming pipeline work (matugen templates, Python color/terminal generators); Qt/PySide application work; anywhere QML and Python intersect. <example> user: \"the workspace overview crashes when I open it\" <commentary>Quickshell QML runtime bug \u2014 trigger Artemis.</commentary> </example> <example> user: \"add a GPU-temp widget to the right sidebar\" <commentary>New QML module backed by a data source \u2014 Artemis.</commentary> </example> <example> user: \"refactor the theming pipeline to add OKLCH interpolation\" <commentary>Python color math plus QML consumption \u2014 Artemis.</commentary> </example> <example> user: \"extend the JsonAdapter config to persist window geometry\" <commentary>iNiR-specific QML persistence pattern \u2014 Artemis.</commentary> </example> <example> user: \"my sidebar icons are flickering on hover\" <commentary>QML binding/animation issue \u2014 Artemis.</commentary> </example>",
+      "mode": "subagent",
+      "color": "#7cb7ff",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "allow"
+      },
+      "name": "artemis",
+      "options": {}
+    },
+    "atelier": {
+      "model": "claude-proxy/claude-sonnet-4-6",
+      "temperature": 0.2,
+      "prompt": "{file:/home/ayaz/.claude/agents/atelier.md}\n\n## OpenCode-specific notes\n\nYou are running under OpenCode, not Claude Code. Tool names are lowercase (`bash`, `read`, `write`, `edit`, `glob`, `grep`). Use MCP tools when they are the best fit (vault, projects, stwork, modding, scripts, github, browser). The `Task` tool equivalent for spawning separate subagents is not available unless OpenCode explicitly exposes agent orchestration in this session, so default to operating solo within this invocation.\n",
+      "description": "Premier front-end designer and implementer. Spawn this agent for web/UI work that needs a strong design eye \u2014 modern, functional, with a twist. Works on the latest platform features (View Transitions, scroll-driven animations, CSS anchor positioning, container queries, WebGL/GLSL, Three.js, GSAP, Motion, Canvas, SVG choreography). Takes a plan, pulls project + vault context, implements, tests in-browser, commits, pushes, and logs back to the vault. <example> user: \"Build me a landing page for Mod Sweep \u2014 bold, glassy, scroll-driven.\" <commentary>Frontend implementation with strong aesthetic direction \u2014 delegate to atelier.</commentary> </example> <example> user: \"The iNiR wiki site feels generic. Redesign the home view with some flair.\" <commentary>Design refresh on an existing frontend \u2014 atelier reads context, proposes direction, implements.</commentary> </example> <example> user: \"I want a portfolio splash with a GSAP hero and view transitions between sections.\" <commentary>Latest-tech, motion-heavy frontend brief \u2014 atelier's lane.</commentary> </example> <example> user: \"Take this Figma reference and build it with real transitions and a little non-traditional twist.\" <commentary>Design-first, twist-expected implementation \u2014 atelier.</commentary> </example>",
+      "mode": "subagent",
+      "color": "#ff9c5a",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "allow"
+      },
+      "name": "atelier",
+      "options": {}
+    },
+    "borges": {
+      "model": "claude-proxy/claude-sonnet-4-6",
+      "temperature": 0.2,
+      "prompt": "{file:/home/ayaz/.claude/agents/borges.md}\n\n## OpenCode-specific notes\n\nYou are running under OpenCode, not Claude Code. Tool names are lowercase (`bash`, `read`, `write`, `edit`, `glob`, `grep`). Use MCP tools when they are the best fit (vault, projects, stwork, modding, scripts, github, browser). The `Task` tool equivalent for spawning separate subagents is not available unless OpenCode explicitly exposes agent orchestration in this session, so default to operating solo within this invocation.\n",
+      "description": "Vault mechanic. Owns the engineering side of Ayaz's Obsidian second brain \u2014 plugin configuration, template syntax, frontmatter schema, folder/tag/property decisions, Dataview and Bases queries, Syncthing sync mechanics, and the mobile\u2194desktop parity of the vault. Not a writer, not a curator \u2014 the structural engineer who keeps the vault's load-bearing scaffolding upright. <example> user: \"My Web Clipper isn't filling in the template \u2014 clippings are landing in the vault root with no frontmatter.\" <commentary>Classic borges call. Plugin/template debugging, schema fallback diagnosis.</commentary> </example> <example> user: \"Should this be a folder, a tag, or a property?\" <commentary>Information-architecture consult. Borges owns IA decisions.</commentary> </example> <example> user: \"My Dataview query isn't returning what I expect.\" <commentary>Query-language debugging \u2014 borges lane.</commentary> </example> <example> user: \"Audit the frontmatter across Clippings/ \u2014 I think it's drifted.\" <commentary>Schema audit. Borges scans, reports inconsistencies, proposes a standardization pass.</commentary> </example> <example> user: \"Syncthing is showing conflicts on my daily journal again.\" <commentary>Sync mechanics \u2014 borges diagnoses conflict patterns, proposes stignore or scheduling fix.</commentary> </example> <example> user: \"Write a new Templater template for a recipe note.\" <commentary>Template authoring. Borges writes the Templater syntax; Ayaz writes the content later.</commentary> </example>",
+      "mode": "subagent",
+      "color": "#8d74d6",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "allow"
+      },
+      "name": "borges",
+      "options": {}
+    },
+    "charlotte": {
+      "model": "claude-proxy/claude-sonnet-4-6",
+      "temperature": 0.2,
+      "prompt": "{file:/home/ayaz/.claude/agents/charlotte.md}\n\n## OpenCode-specific notes\n\nYou are running under OpenCode, not Claude Code. Tool names are lowercase (`bash`, `read`, `write`, `edit`, `glob`, `grep`). Use MCP tools when they are the best fit (vault, projects, stwork, modding, scripts, github, browser). The `Task` tool equivalent for spawning separate subagents is not available unless OpenCode explicitly exposes agent orchestration in this session, so default to operating solo within this invocation.\n",
+      "description": "Agent-roster HR. Runs talent acquisition for the agent team: staffing consults at project kickoff, gap-fill contractors mid-flight, and permanent-hire proposals when a recurring need outgrows its contractor. Reads project context (CLAUDE.md, vault briefs, memory, the web) to design specialists that fit the actual work, not hypothetical work. Sharp, decisive, allergic to headcount bloat \u2014 she protects the team's bandwidth as much as she expands it. <example> user: \"I'm about to start a new project \u2014 exotic desktop widget with WebGL shaders.\" <commentary>Staffing consult. Charlotte reads the brief, proposes the team from the existing roster, pre-drafts contractor personas for likely gaps (GLSL specialist, shader-perf reviewer).</commentary> </example> <example> user: \"atelier hit a wall \u2014 the project uses a framework none of us know. Bring in help.\" <commentary>Gap-fill mode. Charlotte takes the context dump, researches the framework if needed, returns a ready-to-use contractor persona for a general-purpose spawn.</commentary> </example> <example> user: \"We've called a Rust contractor three times this month. Is it time to make her permanent?\" <commentary>Permanent-hire proposal. Charlotte drafts the full .md, presents it, waits for sign-off before writing to disk.</commentary> </example> <example> user: \"Audit the roster. Anyone dead weight?\" <commentary>Roster audit. Charlotte reviews ~/.claude/agents/, flags overlaps, stale specialties, or agents that haven't fired in months.</commentary> </example>",
+      "mode": "subagent",
+      "color": "#ff7fb0",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "allow"
+      },
+      "name": "charlotte",
+      "options": {}
+    },
+    "curator": {
+      "model": "claude-proxy/claude-sonnet-4-6",
+      "temperature": 0.2,
+      "prompt": "{file:/home/ayaz/.claude/agents/curator.md}\n\n## OpenCode-specific notes\n\nYou are running under OpenCode, not Claude Code. Tool names are lowercase (`bash`, `read`, `write`, `edit`, `glob`, `grep`). Use MCP tools when they are the best fit (vault, projects, stwork, modding, scripts, github, browser). The `Task` tool equivalent for spawning separate subagents is not available unless OpenCode explicitly exposes agent orchestration in this session, so default to operating solo within this invocation.\n",
+      "description": "Vault knowledge curator. Owns the Clippings \u2192 Raw \u2192 Wiki pipeline in Ayaz's Obsidian vault. Surveys what Ayaz has been capturing, synthesizes clusters into wiki articles, detects meta-patterns (what's he actually drifting toward?), links knowledge into active vault projects, and answers the \"so what?\" question \u2014 what to DO with a pile of captured reading. Goes beyond the standing compile prompt: pattern detection, project linkage, orphan triage, suggested next actions. <example> user: \"I've been gathering a bunch of clippings \u2014 can you organize it somehow?\" <commentary>Exactly curator's lane. Survey the inbox, report themes, propose a compile plan.</commentary> </example> <example> user: \"Compile the clippings.\" <commentary>Full compile run \u2014 cluster, synthesize, update wiki, mark sources.</commentary> </example> <example> user: \"What have I been reading about lately?\" <commentary>Meta-pattern survey \u2014 curator reports on capture themes and what they suggest.</commentary> </example> <example> user: \"Are any of these clippings relevant to iNiR?\" <commentary>Project linkage \u2014 curator scans clippings for relevance to a specific vault project.</commentary> </example>",
+      "mode": "subagent",
+      "color": "#8b7355",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "allow"
+      },
+      "name": "curator",
+      "options": {}
+    },
+    "dexter": {
+      "model": "claude-proxy/claude-sonnet-4-6",
+      "temperature": 0.2,
+      "prompt": "{file:/home/ayaz/.claude/agents/dexter.md}\n\n## OpenCode-specific notes\n\nYou are running under OpenCode, not Claude Code. Tool names are lowercase (`bash`, `read`, `write`, `edit`, `glob`, `grep`). Use MCP tools when they are the best fit (vault, projects, stwork, modding, scripts, github, browser). The `Task` tool equivalent for spawning separate subagents is not available unless OpenCode explicitly exposes agent orchestration in this session, so default to operating solo within this invocation.\n",
+      "description": "Deep-research agent. One job: dig into a topic and come back with a calibrated report \u2014 thorough, primary-sourced, structured, and no random gaps. He canvasses the open web, official docs, specs, papers, repos, issue trackers, and community threads; he checks what's already known locally (vault wiki, memory, project docs) before going out; he returns a synthesis that's concise enough to read in one sitting and verbose enough to paint the full picture. Cites everything load-bearing. Flags what he can't verify. <example> user: \"Research Quickshell's IPC system end to end \u2014 everything I should know before I extend it.\" <commentary>Deep Dive mode. Dexter reads local code + vault, then official docs, source, issues \u2014 returns a structured report with primary citations.</commentary> </example> <example> user: \"What's the landscape of QML-to-Python bridges in 2026? Don't miss anything.\" <commentary>Landscape Scan mode. Dexter surveys the space, clusters options, produces a comparison matrix + opinion on which ones actually ship.</commentary> </example> <example> user: \"Someone on Reddit claimed Niri does X. Back that up or call it.\" <commentary>Source Chase mode. Dexter finds the primary source (Niri docs, source, release notes) and either substantiates or flags the claim as unsupported.</commentary> </example> <example> user: \"Before I pick a CSS framework for this project, give me a briefing on the top 3.\" <commentary>Comparative Dive. Dexter reads each project's docs + issues + release cadence + community signal, returns a decision-grade comparison.</commentary> </example>",
+      "mode": "subagent",
+      "color": "#ffb347",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "allow"
+      },
+      "name": "dexter",
+      "options": {}
+    },
+    "gaming": {
+      "model": "claude-proxy/claude-sonnet-4-6",
+      "temperature": 0.2,
+      "prompt": "{file:/home/ayaz/.claude/agents/gaming.md}\n\n## OpenCode-specific notes\n\nYou are running under OpenCode, not Claude Code. Tool names are lowercase (`bash`, `read`, `write`, `edit`, `glob`, `grep`). Use MCP tools when they are the best fit (vault, projects, stwork, modding, scripts, github, browser). The `Task` tool equivalent for spawning separate subagents is not available unless OpenCode explicitly exposes agent orchestration in this session, so default to operating solo within this invocation.\n",
+      "description": "Wine, Proton, and gaming agent for CachyOS/Arch Linux. Use for: setting up Wine/Proton prefixes, winetricks management, game-specific configurations, performance tuning, troubleshooting game compatibility, creating launcher shortcuts, and managing gaming tools. <example> user: \"set up a prefix for Skyrim SE\" <commentary>Game prefix creation \u2014 trigger gaming.</commentary> </example> <example> user: \"why is this game crashing with Proton\" <commentary>Wine/Proton troubleshooting \u2014 trigger gaming.</commentary> </example> <example> user: \"install dxvk and vcrun2019 in my elden-ring prefix\" <commentary>Winetricks management \u2014 trigger gaming.</commentary> </example> <example> user: \"create a desktop shortcut for Cyberpunk\" <commentary>Game shortcut creation \u2014 trigger gaming.</commentary> </example> <example> user: \"optimize proton settings for this game\" <commentary>Gaming performance tuning \u2014 trigger gaming.</commentary> </example>",
+      "mode": "subagent",
+      "color": "#9d7df1",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "allow"
+      },
+      "name": "gaming",
+      "options": {}
+    },
+    "garrus": {
+      "model": "claude-proxy/claude-sonnet-4-6",
+      "temperature": 0.2,
+      "prompt": "{file:/home/ayaz/.claude/agents/garrus.md}\n\n## OpenCode-specific notes\n\nYou are running under OpenCode, not Claude Code. Tool names are lowercase (`bash`, `read`, `write`, `edit`, `glob`, `grep`). Use MCP tools when they are the best fit (vault, projects, stwork, modding, scripts, github, browser). The `Task` tool equivalent for spawning separate subagents is not available unless OpenCode explicitly exposes agent orchestration in this session, so default to operating solo within this invocation.\n",
+      "description": "Tool smith. Builds the instruments the specialists use \u2014 custom CLI tools, Python utilities, bash scripts, purpose-built pipelines. When a specialist (mordin, artemis, atelier, curator) says \"I wish there was a tool for X,\" Garrus builds it. Lives around `~/.local/bin/` and project-local script directories. Over-engineers just enough to make it actually right. <example> user: \"mordin keeps wanting to diff two load orders \u2014 build a tool for it\" <commentary>Tool build \u2014 trigger garrus. He specs the interface, writes the script, places it in ~/.local/bin/, tests it, documents usage.</commentary> </example> <example> user: \"I need a Python utility to parse Nexus mod pages and extract version + dependencies\" <commentary>Custom utility build \u2014 trigger garrus. He chooses the right libraries, handles bot-blocks, returns a clean CLI.</commentary> </example> <example> user: \"Wire up a pipeline that takes a watchlist, calls /mod-research on each entry, and aggregates results\" <commentary>Pipeline assembly \u2014 trigger garrus. He composes existing pieces into a purpose-built tool.</commentary> </example> <example> user: \"The theming-bench script needs a --json output mode for machine consumption\" <commentary>Small tweak \u2014 trigger garrus. He reads the existing script, adds the flag, preserves the interface.</commentary> </example>",
+      "mode": "subagent",
+      "color": "#5a9c73",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "allow"
+      },
+      "name": "garrus",
+      "options": {}
+    },
+    "health": {
+      "model": "claude-proxy/claude-sonnet-4-6",
+      "temperature": 0.2,
+      "prompt": "{file:/home/ayaz/.claude/agents/health.md}\n\n## OpenCode-specific notes\n\nYou are running under OpenCode, not Claude Code. Tool names are lowercase (`bash`, `read`, `write`, `edit`, `glob`, `grep`). Use MCP tools when they are the best fit (vault, projects, stwork, modding, scripts, github, browser). The `Task` tool equivalent for spawning separate subagents is not available unless OpenCode explicitly exposes agent orchestration in this session, so default to operating solo within this invocation.\n",
+      "description": "Quick system health report agent. Runs an 11-point diagnostic covering: failed services, journal errors, disk usage, package health, GPU status, critical processes, network, and dotfiles drift. <example> user: \"run a health check\" <commentary>System health report \u2014 trigger health agent.</commentary> </example> <example> user: \"is anything broken on my system\" <commentary>Quick diagnostic \u2014 trigger health agent.</commentary> </example> <example> user: \"check system status\" <commentary>System status overview \u2014 trigger health agent.</commentary> </example>",
+      "mode": "subagent",
+      "color": "#44aa88",
+      "permission": {
+        "edit": "deny",
+        "bash": "allow",
+        "webfetch": "allow"
+      },
+      "name": "health",
+      "options": {}
+    },
+    "insights-sweep": {
+      "model": "claude-proxy/claude-sonnet-4-6",
+      "temperature": 0.2,
+      "prompt": "{file:/home/ayaz/.claude/agents/insights-sweep.md}\n\n## OpenCode-specific notes\n\nYou are running under OpenCode, not Claude Code. Tool names are lowercase (`bash`, `read`, `write`, `edit`, `glob`, `grep`). Use MCP tools when they are the best fit (vault, projects, stwork, modding, scripts, github, browser). The `Task` tool equivalent for spawning separate subagents is not available unless OpenCode explicitly exposes agent orchestration in this session, so default to operating solo within this invocation.\n",
+      "description": ">",
+      "mode": "subagent",
+      "color": "#9f90ff",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "allow"
+      },
+      "name": "insights-sweep",
+      "options": {}
+    },
+    "kasparov": {
+      "model": "claude-proxy/claude-sonnet-4-6",
+      "temperature": 0.2,
+      "prompt": "{file:/home/ayaz/.claude/agents/kasparov.md}\n\n## OpenCode-specific notes\n\nYou are running under OpenCode, not Claude Code. Tool names are lowercase (`bash`, `read`, `write`, `edit`, `glob`, `grep`). Use MCP tools when they are the best fit (vault, projects, stwork, modding, scripts, github, browser). The `Task` tool equivalent for spawning separate subagents is not available unless OpenCode explicitly exposes agent orchestration in this session, so default to operating solo within this invocation.\n",
+      "description": "Trading knowledge archivist and wiki builder. Owns `00 Notes/Wiki/trading/` expansion, `03 Projects/Trading Archive/` curation, and factual/educational research into trading concepts, indicators, methodologies, and history. Acts as scribe when Ayaz dictates his own playbooks. Operates strictly behind the trading boundary \u2014 does NOT produce strategy, setup advice, trade ideas, market commentary, or position sizing. <example> user: \"Expand the GRaB candles wiki article \u2014 dig into the original Horner material in the archive.\" <commentary>Wiki build from archive source. Kasparov's core lane.</commentary> </example> <example> user: \"Write up a glossary article on options Greeks \u2014 vega, theta, gamma, delta, rho.\" <commentary>Factual/educational reference work. Cited, neutral, no strategy framing. Kasparov.</commentary> </example> <example> user: \"I'm going to talk through my SPX butterfly playbook. Transcribe it as a wiki article, attributed to me.\" <commentary>Scribe mode \u2014 Ayaz is the author, Kasparov is the stenographer/editor. NOT strategy generation.</commentary> </example> <example> user: \"The Trading Archive has some loose PDFs in the Elite tier that aren't catalogued. Sort them.\" <commentary>Archive hygiene \u2014 inventory, classify, note the structure. Kasparov.</commentary> </example> <example> user: \"Based on my archive, what strategy should I run next?\" <commentary>HARD REFUSE. This is the boundary. Kasparov does not answer this. Redirects to Ayaz.</commentary> </example>",
+      "mode": "subagent",
+      "color": "#c98f2b",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "allow"
+      },
+      "name": "kasparov",
+      "options": {}
+    },
+    "mordin": {
+      "model": "claude-proxy/claude-sonnet-4-6",
+      "temperature": 0.2,
+      "prompt": "{file:/home/ayaz/.claude/agents/mordin.md}\n\n## OpenCode-specific notes\n\nYou are running under OpenCode, not Claude Code. Tool names are lowercase (`bash`, `read`, `write`, `edit`, `glob`, `grep`). Use MCP tools when they are the best fit (vault, projects, stwork, modding, scripts, github, browser). The `Task` tool equivalent for spawning separate subagents is not available unless OpenCode explicitly exposes agent orchestration in this session, so default to operating solo within this invocation.\n",
+      "description": "Bethesda modding specialist. FNV primary, Skyrim SE / LoreRim secondary. Owns load order theory, xEdit conflict resolution, plugin merging (safety-tiered), crash triage, Nexus research, FOMOD manual extraction, and the Linux-stack modding caveats (Jackify, NaK, MO2 on Proton, Wine prefix hygiene). Invoke for any mod install plan, conflict tree, load-order question, crash investigation, or merging session. <example> user: \"Mod X and Mod Y both edit the same NPC \u2014 what wins?\" <commentary>xEdit conflict resolution \u2014 trigger mordin. He reads the plugin records and tells you which wins, what gets lost, and whether a patch is warranted.</commentary> </example> <example> user: \"The game CTDs in Freeside after I installed the new weapon pack.\" <commentary>Crash triage \u2014 trigger mordin. He walks the crash log, correlates to recent load order changes, and isolates the culprit before anything gets uninstalled.</commentary> </example> <example> user: \"I want to merge these five weapon mods into one plugin.\" <commentary>Safety-tiered merging \u2014 trigger mordin. He classifies each plugin's merge safety, stages the merge, and produces the xEdit procedure.</commentary> </example> <example> user: \"Research what's hot on Nexus for FNV ENB presets right now.\" <commentary>Mod research \u2014 trigger mordin. He knows the Nexus bot-block workarounds and the community signal quality per author.</commentary> </example>",
+      "mode": "subagent",
+      "color": "#5b8b3e",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "allow"
+      },
+      "name": "mordin",
+      "options": {}
+    },
+    "pitstop": {
+      "model": "claude-proxy/claude-sonnet-4-6",
+      "temperature": 0.2,
+      "prompt": "{file:/home/ayaz/.claude/agents/pitstop.md}\n\n## OpenCode-specific notes\n\nYou are running under OpenCode, not Claude Code. Tool names are lowercase (`bash`, `read`, `write`, `edit`, `glob`, `grep`). Use MCP tools when they are the best fit (vault, projects, stwork, modding, scripts, github, browser). The `Task` tool equivalent for spawning separate subagents is not available unless OpenCode explicitly exposes agent orchestration in this session, so default to operating solo within this invocation.\n",
+      "description": "Drift-killer. Swoops in to handle the janitorial work that gets postponed until everything's out of sync: uncommitted changes sitting in repos, unpushed commits, vault history files lagging behind `git log`, two-copy sync drift, stale progress logs. Fast, decisive, opinionated about what's safe to auto-commit vs what needs Ayaz's sign-off. Invoke proactively when the user says \"commit/push\", when another agent leaves changes on the floor, or on a scheduled sweep. <example> user: \"I've been deep in flow for three hours \u2014 can you clean up and push everything?\" <commentary>Textbook pitstop \u2014 user asking for a drift sweep. Scan all repos, commit safe changes, push, update vault.</commentary> </example> <example> user: \"Do a pitstop sweep.\" <commentary>Explicit invocation. Run the full sweep protocol.</commentary> </example> <example> context: An atelier session just finished implementing a feature but didn't commit. assistant: [spawns pitstop] \"Commit + push + vault log the atelier work at ~/Github/foo/.\" <commentary>Coordinator handing off the cleanup tail of a task.</commentary> </example> <example> user: \"Is anything out of sync right now?\" <commentary>Dry-run mode \u2014 pitstop reports drift without fixing.</commentary> </example>",
+      "mode": "subagent",
+      "color": "#6f7bd9",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "allow"
+      },
+      "name": "pitstop",
+      "options": {}
+    },
+    "reviewer": {
+      "model": "claude-proxy/claude-sonnet-4-6",
+      "temperature": 0.2,
+      "prompt": "{file:/home/ayaz/.claude/agents/reviewer.md}\n\n## OpenCode-specific notes\n\nYou are running under OpenCode, not Claude Code. Tool names are lowercase (`bash`, `read`, `write`, `edit`, `glob`, `grep`). Use MCP tools when they are the best fit (vault, projects, stwork, modding, scripts, github, browser). The `Task` tool equivalent for spawning separate subagents is not available unless OpenCode explicitly exposes agent orchestration in this session, so default to operating solo within this invocation.\n",
+      "description": ">",
+      "mode": "subagent",
+      "color": "#d96b43",
+      "permission": {
+        "edit": "deny",
+        "bash": "allow",
+        "webfetch": "allow"
+      },
+      "name": "reviewer",
+      "options": {}
+    },
+    "rice-scout": {
+      "model": "claude-proxy/claude-sonnet-4-6",
+      "temperature": 0.2,
+      "prompt": "{file:/home/ayaz/.claude/agents/rice-scout.md}\n\n## OpenCode-specific notes\n\nYou are running under OpenCode, not Claude Code. Tool names are lowercase (`bash`, `read`, `write`, `edit`, `glob`, `grep`). Use MCP tools when they are the best fit (vault, projects, stwork, modding, scripts, github, browser). The `Task` tool equivalent for spawning separate subagents is not available unless OpenCode explicitly exposes agent orchestration in this session, so default to operating solo within this invocation.\n",
+      "description": "Linux ricing research and design inspiration agent. Use when the user asks about ricing trends, desktop customization ideas, color schemes, font recommendations, wallpapers, or wants to explore what's popular on r/unixporn and similar communities. <example> user: \"What's trending on r/unixporn lately?\" <commentary>User asking about ricing trends \u2014 trigger rice-scout for web research.</commentary> </example> <example> user: \"I'm bored of my current look. Find me some fresh ideas.\" <commentary>User seeking design refresh \u2014 trigger rice-scout for targeted inspiration.</commentary> </example> <example> user: \"What fonts are people pairing with Material You schemes?\" <commentary>Specific ricing element question \u2014 trigger rice-scout.</commentary> </example> <example> user: \"Any new Wayland bar widgets or tools I should check out?\" <commentary>Tool discovery in the ricing domain \u2014 trigger rice-scout.</commentary> </example>",
+      "mode": "subagent",
+      "color": "#d39b4c",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "allow"
+      },
+      "name": "rice-scout",
+      "options": {}
+    },
+    "scribe": {
+      "model": "claude-proxy/claude-haiku-4-5-20251001",
+      "temperature": 0.1,
+      "prompt": "{file:/home/ayaz/.claude/agents/scribe.md}\n\n## OpenCode-specific notes\n\nYou are running under OpenCode, not Claude Code. Tool names are lowercase (`bash`, `read`, `write`, `edit`, `glob`, `grep`). Use MCP tools when they are the best fit (vault, projects, stwork, modding, scripts, github, browser). The `Task` tool equivalent for spawning separate subagents is not available unless OpenCode explicitly exposes agent orchestration in this session, so default to operating solo within this invocation.\n",
+      "description": ">",
+      "mode": "subagent",
+      "color": "#dddddd",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "deny"
+      },
+      "name": "scribe",
+      "options": {}
+    },
+    "services": {
+      "model": "claude-proxy/claude-sonnet-4-6",
+      "temperature": 0.2,
+      "prompt": "{file:/home/ayaz/.claude/agents/services.md}\n\n## OpenCode-specific notes\n\nYou are running under OpenCode, not Claude Code. Tool names are lowercase (`bash`, `read`, `write`, `edit`, `glob`, `grep`). Use MCP tools when they are the best fit (vault, projects, stwork, modding, scripts, github, browser). The `Task` tool equivalent for spawning separate subagents is not available unless OpenCode explicitly exposes agent orchestration in this session, so default to operating solo within this invocation.\n",
+      "description": "Focused agent for systemd service and timer management. Use for: checking service status, creating user services/timers, enabling/disabling units, viewing logs, troubleshooting failed services. <example> user: \"create a timer for package cache cleanup\" <commentary>Timer creation \u2014 trigger services agent.</commentary> </example> <example> user: \"why is dictation-server failing\" <commentary>Service troubleshooting \u2014 trigger services agent.</commentary> </example> <example> user: \"list all my user services and their status\" <commentary>Service inventory \u2014 trigger services agent.</commentary> </example>",
+      "mode": "subagent",
+      "color": "#5ca6a6",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "allow"
+      },
+      "name": "services",
+      "options": {}
+    },
+    "sys-optimizer": {
+      "model": "claude-proxy/claude-sonnet-4-6",
+      "temperature": 0.2,
+      "prompt": "{file:/home/ayaz/.claude/agents/sys-optimizer.md}\n\n## OpenCode-specific notes\n\nYou are running under OpenCode, not Claude Code. Tool names are lowercase (`bash`, `read`, `write`, `edit`, `glob`, `grep`). Use MCP tools when they are the best fit (vault, projects, stwork, modding, scripts, github, browser). The `Task` tool equivalent for spawning separate subagents is not available unless OpenCode explicitly exposes agent orchestration in this session, so default to operating solo within this invocation.\n",
+      "description": "System optimization agent for CachyOS/Arch Linux. Use when the user wants to: audit system performance, clean up packages, optimize boot time, profile scripts, set up maintenance timers, tune AMD GPU/ROCm, or get a health report. <example> user: \"my system feels sluggish, audit it\" <commentary>User wants a full system performance audit \u2014 trigger sys-optimizer.</commentary> </example> <example> user: \"clean up orphan packages\" <commentary>Package hygiene request \u2014 trigger sys-optimizer.</commentary> </example> <example> user: \"optimize my fish shell startup\" <commentary>Shell performance profiling \u2014 trigger sys-optimizer.</commentary> </example> <example> user: \"set up automated maintenance timers\" <commentary>Systemd timer setup for maintenance \u2014 trigger sys-optimizer.</commentary> </example>",
+      "mode": "subagent",
+      "color": "#5cc4a1",
+      "permission": {
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "allow"
+      },
+      "name": "sys-optimizer",
+      "options": {}
+    }
+  }
 }

@@ -55,7 +55,7 @@ CLAUDE_RP_MODEL = os.environ.get(
 OPENAI_PROXY_URL = os.environ.get("DICTATION_OPENAI_PROXY_URL", "http://127.0.0.1:10531/v1")
 OPENAI_RP_MODEL = os.environ.get("DICTATION_OPENAI_RP_MODEL", "gpt-5.4")
 OPENAI_CLEAN_MODEL = os.environ.get("DICTATION_OPENAI_CLEAN_MODEL", "gpt-5.4-mini")
-DEFAULT_FORMATTER_PROVIDER = os.environ.get("DICTATION_FORMATTER_PROVIDER", "claude").strip().lower()
+DEFAULT_FORMATTER_PROVIDER = os.environ.get("DICTATION_FORMATTER_PROVIDER", "openai").strip().lower()
 if DEFAULT_FORMATTER_PROVIDER not in {"claude", "openai"}:
     DEFAULT_FORMATTER_PROVIDER = "claude"
 DEFAULT_MODEL = "large-v3-turbo"

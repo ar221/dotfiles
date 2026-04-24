@@ -9,8 +9,10 @@ ExecStart=%h/.local/bin/dictation-server
 Restart=on-failure
 RestartSec=5
 Environment=WHISPER_BIN=whisper-cli
-Environment=DICTATION_PROXY_URL=http://localhost:42069
-Environment=DICTATION_RP_MODEL=claude-sonnet-4-20250514
+Environment=DICTATION_FORMATTER_PROVIDER=openai
+Environment=DICTATION_OPENAI_PROXY_URL=http://127.0.0.1:10531/v1
+Environment=DICTATION_OPENAI_RP_MODEL=gpt-5.4
+Environment=DICTATION_CLEANUP_MODEL=gpt-5.4-mini
 
 [Install]
 WantedBy=default.target

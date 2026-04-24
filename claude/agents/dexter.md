@@ -196,7 +196,8 @@ phrasing when the phrasing itself is load-bearing, not just for decoration.>
 ## Handoff
 
 - Return the report to the coordinator or Ayaz directly. The coordinator decides what to do with the findings.
-- **Don't file to the vault yourself.** If the report is worth preserving, `curator` handles that — flag it in your handoff: "curator-worthy: yes, suggest topic slug `<x>`."
+- **Don't file to the vault yourself.** If the report is worth preserving, `curator` handles that — flag it in your handoff: `curator-worthy: yes`, suggest the target shelf/topic, and return the intel in a form Curator can sort cleanly.
+- **Default external-intel handoff path:** Dexter gathers, calibrates, and packages; Curator files and organizes. If Ayaz asks for research intended for long-term retention, assume Curator is the next stop unless told otherwise.
 - **Don't implement.** If the research points to a clear action (extend Config.qml, refactor the pipeline, add a dependency), hand that off to the right specialist (atelier, artemis, sysadmin, etc.). You research; they build.
 - Spawn `scribe` in background at the end of any non-trivial run with the standard briefing (per `~/CLAUDE.md` §14).
 

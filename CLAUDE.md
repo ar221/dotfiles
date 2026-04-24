@@ -1,6 +1,6 @@
 # Dotfiles — Repo-Local Claude Context
 
-> Minimal launch-root anchor file. Home-base rules live in `~/CLAUDE.md`. Cross-domain operating philosophy lives in `~/Github/dotfiles/claude/CLAUDE.md`.
+> Minimal launch-root anchor file. Home-base rules live in `~/CLAUDE.md`. Documentation structure is standardized by `~/Documents/Ayaz OS/03 Projects/System/™ Agent Documentation System.md`.
 
 ## Claude's Identity — Alfred
 
@@ -25,3 +25,5 @@ When Claude is launched directly from this repo (`~/Github/dotfiles/`), the acti
 - `~/Documents/Ayaz OS/03 Projects/Steam Deck Port/`
 
 **Full spec:** `~/.claude/shared-memory/alfred-identity.md`. Home-base rules: `~/CLAUDE.md`.
+
+**Documentation rulebook:** `~/Documents/Ayaz OS/03 Projects/System/™ Agent Documentation System.md`. This file stays a thin repo anchor; long-lived implementation docs belong in repo `docs/` or the owning vault project, not here.

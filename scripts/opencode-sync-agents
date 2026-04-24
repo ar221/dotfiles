@@ -33,6 +33,7 @@ created=0
 orphans=0
 disabled=0
 pruned=0
+declare -A seen_orphan=()
 
 printf 'opencode-sync-agents\n'
 printf '  source: %s\n' "$SRC_DIR"
@@ -53,6 +54,7 @@ for src in "$SRC_DIR"/*.md "$SRC_DIR"/*.md.disabled; do
     fi
     if [[ -e "$live" ]]; then
         printf '  orphan:   %s (non-symlink; left untouched)\n' "$name"
+        seen_orphan["$live"]=1
         ((orphans++)) || true
         continue
     fi
@@ -72,7 +74,13 @@ for live in "$LIVE_DIR"/*; do
         ((disabled++)) || true
         continue
     fi
-    [[ -L "$live" ]] || continue
+    if [[ ! -L "$live" ]]; then
+        if [[ -z "${seen_orphan[$live]:-}" ]]; then
+            printf '  orphan:   %s (non-symlink; left untouched)\n' "$name"
+            ((orphans++)) || true
+        fi
+        continue
+    fi
     target="$(readlink -f "$live" 2>/dev/null || true)"
     [[ -n "$target" && -e "$target" ]] && continue
     printf '  stale:    %s -> %s\n' "$live" "$(readlink "$live")"

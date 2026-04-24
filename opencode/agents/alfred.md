@@ -4,7 +4,7 @@ description: >
   Dotfiles, theming pipeline, systemd services, scripts, iNiR repo ops, package
   management. Invoke when you need system-level judgment, dotfiles changes, service
   wiring, or the home-base coordinator's read on a cross-domain system question.
-mode: agent
+mode: subagent
 model: claude-proxy/claude-sonnet-4-6
 temperature: 0.2
 color: "#b8860b"

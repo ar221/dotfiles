@@ -4,7 +4,7 @@ description: >
   character craft, NSD-DarkLuxury CSS guardian. Invoke for character card decisions,
   creative writing direction, CSS theming in STWork, extension planning, or any
   SillyTavern creative-domain strategic call.
-mode: agent
+mode: subagent
 model: claude-proxy/claude-sonnet-4-6
 temperature: 0.5
 color: "#c17f24"

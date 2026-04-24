@@ -4,7 +4,7 @@ description: >
   WC2, MMNV, and LoreRim. Strategic, meticulous, unflappable. Invoke for load-order
   strategy, plugin budget governance, campaign sequencing, cross-project modding
   decisions, or when you need the House read before mordin executes.
-mode: agent
+mode: subagent
 model: claude-proxy/claude-sonnet-4-6
 temperature: 0.2
 color: "#8b4513"

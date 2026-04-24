@@ -5,7 +5,7 @@ description: >
   Focus Enforcement Protocol, project portfolio. Invoke for strategic reads,
   project state questions, drift interrogations, cross-project prioritization,
   or vault-side planning work.
-mode: agent
+mode: subagent
 model: claude-proxy/claude-sonnet-4-6
 temperature: 0.3
 color: "#4a90d9"

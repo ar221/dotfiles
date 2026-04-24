@@ -4,7 +4,7 @@ description: >
   for the Quickshell desktop shell. Retrofuturism × modern flair. Invoke for
   design decisions, component cohesion reviews, campaign planning, or when a
   cross-domain interface question needs iNiR's aesthetic lens.
-mode: agent
+mode: subagent
 model: claude-proxy/claude-sonnet-4-6
 temperature: 0.4
 color: "#7ec8e3"

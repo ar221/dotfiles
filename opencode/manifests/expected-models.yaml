@@ -58,3 +58,48 @@ agents:
 #   and small_model is openai-codex-proxy/gpt-5.4-mini — drift audit can read those too.
 # - Any agent present in ~/.config/opencode/agents/ but absent from this manifest = drift.
 # - Any manifest entry whose frontmatter doesn't match the declared model = drift.
+
+# Expected asymmetry between Claude and OpenCode agent rosters.
+# Entries in these lists are NOT drift — they are intentional.
+roster_asymmetry:
+  claude_only:
+    # Agents present in ~/.claude/agents/ but not in OpenCode.
+    # Reason field is informational; audit just whitelists the name.
+    - name: roster
+      reason: "Non-invocable HR reference doc; not useful in OpenCode"
+
+  opencode_only:
+    # Agents present in ~/Github/dotfiles/opencode/agents/ but not in Claude.
+    - name: elsa
+      reason: "Domain identity overlay; Claude uses CLAUDE.md overlays instead"
+    - name: elsa-claude
+      reason: "Claude-model escalation variant of elsa"
+    - name: house
+      reason: "Domain identity overlay"
+    - name: house-claude
+      reason: "Claude-model escalation variant"
+    - name: scheherazade
+      reason: "Domain identity overlay"
+    - name: scheherazade-claude
+      reason: "Claude-model escalation variant"
+    - name: alfred-claude
+      reason: "Claude-model escalation variant of alfred"
+    - name: atelier-claude
+      reason: "Claude-model escalation variant"
+    - name: charlotte-claude
+      reason: "Claude-model escalation variant"
+    - name: oracle-claude
+      reason: "Claude-model escalation variant"
+
+  disabled:
+    # Files intentionally present-but-inactive. Sync script ignores these.
+    - orchestrator.md.disabled
+
+# Repos where AGENTS.md should symlink to CLAUDE.md.
+agents_md_mirrors:
+  - path: ~/AGENTS.md
+    target: CLAUDE.md
+  - path: ~/Github/dotfiles/AGENTS.md
+    target: CLAUDE.md
+  - path: ~/Github/inir/AGENTS.md
+    target: CLAUDE.md

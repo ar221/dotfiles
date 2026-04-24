@@ -37,7 +37,9 @@ except ImportError:
     sys.exit(2)
 
 DEFAULT_MANIFEST = Path.home() / "Github/dotfiles/opencode/manifests/expected-models.yaml"
+DEFAULT_SOURCE_AGENTS_DIR = Path.home() / "Github/dotfiles/opencode/agents"
 DEFAULT_AGENTS_DIR = Path.home() / ".config/opencode/agents"
+DEFAULT_CLAUDE_AGENTS_DIR = Path.home() / ".claude/agents"
 DEFAULT_CONFIG = Path.home() / ".config/opencode/opencode.json"
 EXPECTED_DEFAULT_MODEL = "openai-codex-proxy/gpt-5.5"
 EXPECTED_SMALL_MODEL = "openai-codex-proxy/gpt-5.4-mini"
@@ -63,13 +65,16 @@ def extract_frontmatter_model(path: Path) -> str | None:
     return None
 
 
-def load_manifest(path: Path) -> dict[str, str]:
+def load_manifest(path: Path) -> dict:
     with path.open() as f:
         doc = yaml.safe_load(f)
-    agents = doc.get("agents") if isinstance(doc, dict) else None
+    if not isinstance(doc, dict):
+        raise ValueError(f"Manifest {path} is not a mapping")
+    agents = doc.get("agents")
     if not isinstance(agents, dict):
         raise ValueError(f"Manifest {path} missing 'agents:' mapping")
-    return {str(k): str(v) for k, v in agents.items()}
+    doc["agents"] = {str(k): str(v) for k, v in agents.items()}
+    return doc
 
 
 def scan_agents_dir(path: Path) -> dict[str, str | None]:
@@ -93,10 +98,78 @@ def read_config_defaults(path: Path) -> tuple[str | None, str | None]:
     return doc.get("model"), doc.get("small_model")
 
 
+def expand(path: str) -> Path:
+    return Path(path).expanduser()
+
+
+def names_from_md(path: Path) -> set[str]:
+    return {p.stem for p in path.glob("*.md") if p.is_file() or p.is_symlink()}
+
+
+def names_from_manifest_list(doc: dict, section: str) -> set[str]:
+    items = doc.get("roster_asymmetry", {}).get(section, [])
+    return {str(item.get("name")) for item in items if isinstance(item, dict) and item.get("name")}
+
+
+def check_agents_md_mirrors(doc: dict, issues: list[str], oks: list[str]) -> None:
+    mirrors = doc.get("agents_md_mirrors", [])
+    if not isinstance(mirrors, list):
+        issues.append("INVALID  agents_md_mirrors: manifest section is not a list")
+        return
+    for item in mirrors:
+        if not isinstance(item, dict) or "path" not in item or "target" not in item:
+            issues.append("INVALID  agents_md_mirrors: entry missing path/target")
+            continue
+        path = expand(str(item["path"]))
+        target = path.parent / str(item["target"])
+        if not path.exists() and not path.is_symlink():
+            issues.append(f"DRIFT    {path}: AGENTS.md mirror missing")
+        elif not path.is_symlink():
+            issues.append(f"DRIFT    {path}: expected symlink to {item['target']}, found regular file")
+        elif path.resolve() != target.resolve():
+            issues.append(f"DRIFT    {path}: resolves to {path.resolve()}, expected {target.resolve()}")
+        else:
+            oks.append(f"OK       {path}: symlink resolves to {target.resolve()}")
+
+
+def check_agent_symlinks(source_dir: Path, live_dir: Path, issues: list[str], oks: list[str]) -> None:
+    for src in sorted(source_dir.glob("*.md")):
+        live = live_dir / src.name
+        if not live.exists() and not live.is_symlink():
+            issues.append(f"DRIFT    {live}: missing symlink for {src.name}")
+        elif not live.is_symlink():
+            issues.append(f"DRIFT    {live}: expected symlink, found regular file")
+        elif live.resolve() != src.resolve():
+            issues.append(f"DRIFT    {live}: resolves to {live.resolve()}, expected {src.resolve()}")
+        else:
+            oks.append(f"OK       {live.name}: symlink resolves to dotfiles agent")
+
+
+def check_roster_asymmetry(doc: dict, source_dir: Path, claude_dir: Path, issues: list[str], oks: list[str]) -> None:
+    if not claude_dir.is_dir():
+        issues.append(f"WARN     claude agents: directory missing: {claude_dir}")
+        return
+    claude = names_from_md(claude_dir)
+    opencode = names_from_md(source_dir)
+    allowed_claude = names_from_manifest_list(doc, "claude_only")
+    allowed_open = names_from_manifest_list(doc, "opencode_only")
+
+    unexpected_claude = sorted((claude - opencode) - allowed_claude)
+    unexpected_open = sorted((opencode - claude) - allowed_open)
+    for name in unexpected_claude:
+        issues.append(f"DRIFT    roster: {name} exists only in Claude agents")
+    for name in unexpected_open:
+        issues.append(f"DRIFT    roster: {name} exists only in OpenCode agents")
+    if not unexpected_claude and not unexpected_open:
+        oks.append("OK       roster: Claude/OpenCode asymmetry matches manifest")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    ap.add_argument("--source-agents-dir", type=Path, default=DEFAULT_SOURCE_AGENTS_DIR)
     ap.add_argument("--agents-dir", type=Path, default=DEFAULT_AGENTS_DIR)
+    ap.add_argument("--claude-agents-dir", type=Path, default=DEFAULT_CLAUDE_AGENTS_DIR)
     ap.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
@@ -107,17 +180,22 @@ def main() -> int:
     if not args.agents_dir.is_dir():
         print(f"error: agents dir not found: {args.agents_dir}", file=sys.stderr)
         return 2
+    if not args.source_agents_dir.is_dir():
+        print(f"error: source agents dir not found: {args.source_agents_dir}", file=sys.stderr)
+        return 2
 
     try:
-        expected = load_manifest(args.manifest)
+        manifest = load_manifest(args.manifest)
     except (yaml.YAMLError, ValueError) as e:
         print(f"error: manifest parse failed: {e}", file=sys.stderr)
         return 2
 
+    expected = manifest["agents"]
     live = scan_agents_dir(args.agents_dir)
     cfg_default, cfg_small = read_config_defaults(args.config)
 
     issues: list[str] = []
+    oks: list[str] = []
 
     # Missing: in manifest, not on disk
     for name in sorted(set(expected) - set(live)):
@@ -143,6 +221,10 @@ def main() -> int:
     if cfg_small and cfg_small != EXPECTED_SMALL_MODEL:
         issues.append(f"DRIFT    opencode.json.small_model: expected={EXPECTED_SMALL_MODEL}, live={cfg_small}")
 
+    check_agents_md_mirrors(manifest, issues, oks)
+    check_agent_symlinks(args.source_agents_dir, args.agents_dir, issues, oks)
+    check_roster_asymmetry(manifest, args.source_agents_dir, args.claude_agents_dir, issues, oks)
+
     if issues:
         print(f"opencode-drift-audit: {len(issues)} issue(s)")
         for line in issues:
@@ -153,6 +235,8 @@ def main() -> int:
         total = len(expected)
         print(f"opencode-drift-audit: clean — {total} agents aligned with manifest")
         print(f"  default={cfg_default}  small={cfg_small}")
+        for line in oks:
+            print(f"  {line}")
     return 0
 
 

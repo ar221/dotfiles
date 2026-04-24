@@ -131,7 +131,7 @@
     }
   },
   "instructions": [
-    "~/.claude/shared-memory/opencode-mobile-context.md"
+    "~/.claude/shared-memory/opencode-context.md"
   ],
   "mcp": {
     "vault": {

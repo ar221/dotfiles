@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SRC_DIR="$HOME/Github/dotfiles/opencode/agents"
+LIVE_DIR="$HOME/.config/opencode/agents"
+APPLY=0
+PRUNE=0
+
+usage() {
+    cat <<EOF
+Usage: opencode-sync-agents [--apply] [--prune]
+
+Reports OpenCode agent symlink drift. --apply creates missing symlinks;
+--prune removes broken symlinks. These actions are independent.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --apply) APPLY=1 ;;
+        --prune) PRUNE=1 ;;
+        -h|--help) usage; exit 0 ;;
+        *) printf 'error: unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
+    esac
+    shift
+done
+
+[[ -d "$SRC_DIR" ]] || { printf 'error: source dir missing: %s\n' "$SRC_DIR" >&2; exit 2; }
+mkdir -p "$LIVE_DIR"
+
+missing=0
+created=0
+orphans=0
+disabled=0
+pruned=0
+
+printf 'opencode-sync-agents\n'
+printf '  source: %s\n' "$SRC_DIR"
+printf '  live:   %s\n' "$LIVE_DIR"
+
+shopt -s nullglob
+for src in "$SRC_DIR"/*.md "$SRC_DIR"/*.md.disabled; do
+    name="$(basename "$src")"
+    if [[ "$name" == *.disabled ]]; then
+        printf '  disabled: %s\n' "$name"
+        ((disabled++)) || true
+        continue
+    fi
+
+    live="$LIVE_DIR/$name"
+    if [[ -L "$live" ]]; then
+        continue
+    fi
+    if [[ -e "$live" ]]; then
+        printf '  orphan:   %s (non-symlink; left untouched)\n' "$name"
+        ((orphans++)) || true
+        continue
+    fi
+
+    printf '  missing:  %s -> %s\n' "$live" "$src"
+    ((missing++)) || true
+    if [[ $APPLY -eq 1 ]]; then
+        ln -s "$src" "$live"
+        ((created++)) || true
+    fi
+done
+
+for live in "$LIVE_DIR"/*; do
+    name="$(basename "$live")"
+    if [[ "$name" == *.disabled ]]; then
+        printf '  disabled: %s\n' "$name"
+        ((disabled++)) || true
+        continue
+    fi
+    [[ -L "$live" ]] || continue
+    target="$(readlink -f "$live" 2>/dev/null || true)"
+    [[ -n "$target" && -e "$target" ]] && continue
+    printf '  stale:    %s -> %s\n' "$live" "$(readlink "$live")"
+    if [[ $PRUNE -eq 1 ]]; then
+        rm "$live"
+        ((pruned++)) || true
+    fi
+done
+
+printf '  summary: missing=%d created=%d orphans=%d disabled=%d pruned=%d\n' \
+    "$missing" "$created" "$orphans" "$disabled" "$pruned"
+
+if (( missing > created || orphans > 0 )); then
+    exit 1
+fi

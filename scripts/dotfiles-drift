@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly SCRIPT_NAME="$(basename "$0")"
+SCRIPT_NAME="$(basename "$0")"
+readonly SCRIPT_NAME
 readonly VERSION="1.0.0"
 readonly DOTFILES_REPO="$HOME/Github/dotfiles"
 readonly INIR_REPO="$HOME/Github/inir"
@@ -107,6 +108,24 @@ check_file_pair() {
     fi
 }
 
+check_opencode_drift() {
+    local output
+
+    if ! command -v opencode-drift-audit &>/dev/null; then
+        drift "OpenCode — opencode-drift-audit not found"
+        DRIFT_FOUND=1
+        return
+    fi
+
+    if output=$(opencode-drift-audit 2>&1); then
+        pass "OpenCode"
+    else
+        drift "OpenCode — audit reported drift"
+        DRIFT_FOUND=1
+        [[ -n "$output" ]] && printf '%s\n' "$output" | sed 's/^/    /'
+    fi
+}
+
 # ─── Main ────────────────────────────────────────────────
 main() {
     printf '\e[1;37m══ Dotfiles Drift Check ══\e[0m\n'
@@ -126,6 +145,9 @@ main() {
     check_pair "Services" "$QUICKSHELL_LIVE/services" "$INIR_REPO/services"
     check_pair "Modules"  "$QUICKSHELL_LIVE/modules"  "$INIR_REPO/modules"
     check_pair "Scripts"  "$QUICKSHELL_LIVE/scripts"  "$INIR_REPO/scripts"
+
+    printf '\n\e[1;36m── OpenCode Platform Synthesis ──\e[0m\n'
+    check_opencode_drift
 
     # Summary
     printf '\n'

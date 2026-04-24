@@ -1,16 +1,21 @@
 function oc --description 'Open Apollo/Constellation flight-deck for OpenCode'
-    # optional ignition banner — fires only if binary exists and stdout is a tty
     if test -x ~/.local/bin/apollo-banner; and isatty stdout
         ~/.local/bin/apollo-banner
     end
 
     set -l ephemeral 0
-    set -l args
+    set -l option_args
+    set -l positional_args
+    set -l seen_positional 0
+
     for arg in $argv
         if test "$arg" = --ephemeral
             set ephemeral 1
+        else if test $seen_positional -eq 0; and string match -qr '^-' -- $arg
+            set -a option_args $arg
         else
-            set -a args $arg
+            set seen_positional 1
+            set -a positional_args $arg
         end
     end
 
@@ -19,11 +24,7 @@ function oc --description 'Open Apollo/Constellation flight-deck for OpenCode'
         set tmux_conf ~/.config/tmux/apollo-ephemeral.conf
     end
 
-    # --- No args → Launchpad ---------------------------------
-    if test (count $args) -eq 0
-        # Spawn a kitty window running the launchpad. On selection, the
-        # launchpad script writes the path to a temp file, then the inner
-        # shell exec's tmux pointed at that path.
+    if test (count $positional_args) -eq 0; and test (count $option_args) -eq 0
         set -l selection_file (mktemp /tmp/apollo-selection.XXXXXX)
 
         kitty --detach \
@@ -45,18 +46,24 @@ function oc --description 'Open Apollo/Constellation flight-deck for OpenCode'
                      echo \$picked > \$recents_tmp; \
                      if test -f ~/.cache/apollo/recents; \
                          grep -vxF \$picked ~/.cache/apollo/recents | head -4 >> \$recents_tmp; end; \
-                      command mv -f \$recents_tmp ~/.cache/apollo/recents; \
-                      kitty @ set-window-title \"APOLLO·\$slug\" 2>/dev/null; \
-                       exec tmux -L \$socket -f $tmux_conf \
-                                new-session -A -s apollo -c \$picked env APOLLO_ROLE=main opencode"
+                     command mv -f \$recents_tmp ~/.cache/apollo/recents; \
+                     kitty @ set-window-title \"APOLLO·\$slug\" 2>/dev/null; \
+                     exec tmux -L \$socket -f $tmux_conf \
+                         new-session -A -s apollo -c \$picked env APOLLO_ROLE=main opencode"
         return 0
     end
 
-    # --- Path arg → direct cockpit ---------------------------
-    set -l path $args[1]
-    set -l rest $args[2..-1]
+    set -l path
+    set -l rest
 
-    # resolve ~ and relative
+    if test (count $positional_args) -eq 0
+        set path $PWD
+        set rest $option_args
+    else
+        set path $positional_args[1]
+        set rest $option_args $positional_args[2..-1]
+    end
+
     set path (realpath $path 2>/dev/null; or echo $path)
 
     set -l slug (string replace -ra '[^a-z0-9]+' '-' (string lower (basename $path)) | string trim -c '-')
@@ -67,7 +74,6 @@ function oc --description 'Open Apollo/Constellation flight-deck for OpenCode'
         set i (math $i + 1)
     end
 
-    # update recents
     mkdir -p ~/.cache/apollo
     set -l recents_tmp (mktemp)
     echo $path >$recents_tmp
